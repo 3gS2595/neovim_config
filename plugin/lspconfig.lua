@@ -72,11 +72,20 @@ nvim_lsp.flow.setup {
   capabilities = capabilities
 }
 
-nvim_lsp.tsserver.setup {
+nvim_lsp.ts_ls.setup {
   on_attach = on_attach,
-  filetypes = { "typescript", "typescriptreact", "typescript.tsx" },
+  filetypes = { "typescript", "typescriptreact", "vue", "typescript.tsx" },
   cmd = { "typescript-language-server", "--stdio" },
-  capabilities = capabilities
+  capabilities = capabilities,
+  init_options = {
+    plugins = { -- I think this was my breakthrough that made it work
+      {
+        name = "@vue/typescript-plugin",
+        location = "/usr/local/lib/node_modules/@vue/language-server",
+        languages = { "vue" },
+      },
+    },
+  }
 }
 
 nvim_lsp.sourcekit.setup {

@@ -1,7 +1,4 @@
-local status, ts = pcall(require, "nvim-treesitter.configs")
-if (not status) then return end
-
-ts.setup {
+require 'nvim-treesitter.configs'.setup {
   highlight = {
     enable = true,
     disable = {},
@@ -12,6 +9,7 @@ ts.setup {
   },
   ensure_installed = {
     "markdown",
+    "regex",
     "markdown_inline",
     "tsx",
     "typescript",
@@ -21,16 +19,10 @@ ts.setup {
     "json",
     "yaml",
     "swift",
+    "vue",
     "css",
     "html",
     "lua"
-  },
-  autotag = {
-    enable = true,
-  },
-  context_commentstring = {
-    enable         = true,
-    enable_autocmd = false,
   }
 }
 

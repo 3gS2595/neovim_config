@@ -19,3 +19,6 @@ require("nvim-tree").setup {
   on_attach = my_on_attach,
   ---
 }
+
+vim.cmd "NvimTreeOpen"
+vim.cmd "tabdo NvimTreeResize 20"
