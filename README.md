@@ -1,6 +1,21 @@
-# Neovim Configuration
-
 A highly customized Neovim setup tailored for Ruby and Vue3/TypeScript development.  
+
+## Prerequisites
+
+- Neovim 0.8 or later recommended
+- `git` installed
+- Node.js and `npm` (for installing `tree-sitter-cli`)
+- Optional: Nerd Font for best icon/font support (see below)
+
+## Installation
+
+1. Clone [packer.nvim](https://github.com/wbthomason/packer.nvim) plugin manager:
+
+```git clone --depth 1 https://github.com/wbthomason/packer.nvim ~/.local/share/nvim/site/pack/packer/start/packer.nvim```
+
+2. Install Plugins inside vim:
+
+```:PackerSync```
 
 ## Key Features
 
@@ -42,20 +57,3 @@ A highly customized Neovim setup tailored for Ruby and Vue3/TypeScript developme
 
 ### Command Line & Notifications
 - Enhanced command line UI with [`noice.nvim`](https://github.com/folke/noice.nvim) plus dependencies [`nui.nvim`](https://github.com/MunifTanjim/nui.nvim) and [`nvim-notify`](https://github.com/rcarriga/nvim-notify).
-
----
-
-## Prerequisites
-
-- Neovim 0.8 or later recommended
-- `git` installed
-- Node.js and `npm` (for installing `tree-sitter-cli`)
-- Optional: Nerd Font for best icon/font support (see below)
-
----
-
-## Installation
-
-1. Clone [packer.nvim](https://github.com/wbthomason/packer.nvim) plugin manager:
-   ```bash
-   git clone --depth 1 https://github.com/wbthomason/packer.nvim ~/.local/share/nvim/site/pack/packer/start/packer.nvim
