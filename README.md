@@ -1,5 +1,3 @@
-A highly customized Neovim setup tailored for Ruby and Vue3/TypeScript development.  
-
 ## Prerequisites
 
 - Neovim 0.8 or later recommended
@@ -7,20 +5,31 @@ A highly customized Neovim setup tailored for Ruby and Vue3/TypeScript developme
 - Node.js and `npm` (for installing `tree-sitter-cli`)
 - Optional: Nerd Font for best icon/font support (see below)
 
-## Installation
-
 1. Clone [packer.nvim](https://github.com/wbthomason/packer.nvim) plugin manager:
 
-```git clone --depth 1 https://github.com/wbthomason/packer.nvim ~/.local/share/nvim/site/pack/packer/start/packer.nvim```
+    ```bash
+    git clone --depth 1 https://github.com/wbthomason/packer.nvim ~/.local/share/nvim/site/pack/packer/start/packer.nvim
+    ```
 
-2. Install Plugins inside vim:
+2. Install [tree-sitter-cli](https://github.com/tree-sitter/tree-sitter):
 
-```:PackerSync```
+    ```bash
+    npm install -g tree-sitter-cli
+    ```
+
+3. Install Plugins inside vim:
+
+    ```vim
+    :PackerSync
+    ```
+
+![A highly customized Neovim setup tailored for Ruby and Vue3/TypeScript development.](https://github.com/user-attachments/assets/de5f4b9e-0b63-4881-ae66-2289fba525f8)
+*Figure 1: A highly customized Neovim setup tailored for Ruby and Vue3/TypeScript development.*
 
 ## Key Features
 
 ### Status Line & UI Enhancements
-- [`lualine.nvim`](https://github.com/nvim-lualine/lualine.nvim) — customizable and performant statusline.
+- customizable and performant statusline with [`lualine.nvim`](https://github.com/nvim-lualine/lualine.nvim).
 - Transparent background support with [`transparent.nvim`](https://github.com/xiyaowong/transparent.nvim).
 - File icons provided by [`nvim-web-devicons`](https://github.com/nvim-tree/nvim-web-devicons).
 - Buffer management via [`nvim-bufferline.lua`](https://github.com/akinsho/nvim-bufferline.lua).
