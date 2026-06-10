@@ -16,7 +16,6 @@
 2. Start Neovim. [lazy.nvim](https://github.com/folke/lazy.nvim) bootstraps itself and installs all plugins on first launch. Run `:Lazy` to inspect, `:Lazy sync` to update.
 
 ![A highly customized Neovim setup tailored for Ruby and Vue3/TypeScript development.](https://github.com/user-attachments/assets/de5f4b9e-0b63-4881-ae66-2289fba525f8)
-*Figure 1: A highly customized Neovim setup tailored for Ruby and Vue3/TypeScript development.*
 
 ## Structure
 
