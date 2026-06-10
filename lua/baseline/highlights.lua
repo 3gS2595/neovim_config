@@ -5,10 +5,10 @@ vim.opt.wildoptions = 'pum'
 vim.opt.pumblend = 5
 vim.opt.background = 'dark'
 
--- highlight yanked text for 200ms using the "Visual" highlight group
-vim.cmd [[
-  augroup highlight_yank
-  autocmd!
-  au TextYankPost * silent! lua vim.highlight.on_yank({higroup="Visual", timeout=100})
-  augroup END
-]]
+-- Briefly highlight yanked text using the "Visual" highlight group
+vim.api.nvim_create_autocmd('TextYankPost', {
+  group = vim.api.nvim_create_augroup('highlight_yank', { clear = true }),
+  callback = function()
+    vim.hl.on_yank({ higroup = 'Visual', timeout = 100 })
+  end,
+})

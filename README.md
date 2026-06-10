@@ -1,38 +1,42 @@
 ## Prerequisites
 
-- Neovim 0.8 or later recommended
+- Neovim 0.11 or later
 - `git` installed
 - Node.js and `npm` (for installing `tree-sitter-cli`)
-- Optional: Nerd Font for best icon/font support (see below)
+- Optional: Nerd Font for best icon/font support
 
-1. Clone [packer.nvim](https://github.com/wbthomason/packer.nvim) plugin manager:
+## Setup
 
-    ```bash
-    git clone --depth 1 https://github.com/wbthomason/packer.nvim ~/.local/share/nvim/site/pack/packer/start/packer.nvim
-    ```
-
-2. Install [tree-sitter-cli](https://github.com/tree-sitter/tree-sitter):
+1. Install [tree-sitter-cli](https://github.com/tree-sitter/tree-sitter):
 
     ```bash
     npm install -g tree-sitter-cli
     ```
 
-3. Install Plugins inside vim:
-
-    ```vim
-    :PackerSync
-    ```
+2. Start Neovim. [lazy.nvim](https://github.com/folke/lazy.nvim) bootstraps itself and installs all plugins on first launch. Run `:Lazy` to inspect, `:Lazy sync` to update.
 
 ![A highly customized Neovim setup tailored for Ruby and Vue3/TypeScript development.](https://github.com/user-attachments/assets/de5f4b9e-0b63-4881-ae66-2289fba525f8)
 *Figure 1: A highly customized Neovim setup tailored for Ruby and Vue3/TypeScript development.*
 
+## Structure
+
+```
+init.lua                  -- core modules + lazy.nvim bootstrap
+lua/baseline/base.lua     -- editor options
+lua/baseline/highlights.lua -- visual options + yank highlight
+lua/baseline/maps.lua     -- keymaps
+lua/baseline/platform.lua -- OS-specific clipboard integration
+lua/baseline/commands.lua -- custom user commands
+lua/plugins/              -- lazy.nvim plugin specs, grouped by domain
+colors/                   -- wildcharm-redux colorscheme
+```
+
 ## Key Features
 
 ### Status Line & UI Enhancements
-- customizable and performant statusline with [`lualine.nvim`](https://github.com/nvim-lualine/lualine.nvim).
+- Customizable and performant statusline, tabline and winbar with [`lualine.nvim`](https://github.com/nvim-lualine/lualine.nvim), including code context via [`nvim-navic`](https://github.com/SmiteshP/nvim-navic).
 - Transparent background support with [`transparent.nvim`](https://github.com/xiyaowong/transparent.nvim).
 - File icons provided by [`nvim-web-devicons`](https://github.com/nvim-tree/nvim-web-devicons).
-- Buffer management via [`nvim-bufferline.lua`](https://github.com/akinsho/nvim-bufferline.lua).
 - Color highlighting with [`nvim-colorizer.lua`](https://github.com/norcalli/nvim-colorizer.lua).
 
 ### File Navigation & Search
@@ -48,21 +52,22 @@
 - Context-aware commenting powered by [`Comment.nvim`](https://github.com/numToStr/Comment.nvim) and Treesitter.
 - Advanced autocompletion using [`nvim-cmp`](https://github.com/hrsh7th/nvim-cmp) with LSP, buffer, and path sources.
 - Snippet support via [`LuaSnip`](https://github.com/L3MON4D3/LuaSnip).
-- Includes integration with **GitHub Copilot** for AI-assisted code completion.
+
+### AI Assistance
+- [Claude Code](https://github.com/coder/claudecode.nvim) integration (`<leader>ac` to toggle, `<leader>as` to send a selection), powered by [`snacks.nvim`](https://github.com/folke/snacks.nvim).
 
 ### Language Server Protocol (LSP) Setup
-- Managed LSP servers with [`mason.nvim`](https://github.com/williamboman/mason.nvim) and bridged by [`mason-lspconfig.nvim`](https://github.com/williamboman/mason-lspconfig.nvim).
+- Native `vim.lsp.config` setup on Neovim 0.11+, with servers managed by [`mason.nvim`](https://github.com/mason-org/mason.nvim) and auto-enabled by [`mason-lspconfig.nvim`](https://github.com/mason-org/mason-lspconfig.nvim).
 - Automatically ensures the following LSP servers are installed:
-  - `vtsls`, `vue_ls`, `eslint`, `lua_ls`, `jsonls`, `html`, `cssls`, `tailwindcss`
+  - `astro`, `cssls`, `eslint`, `html`, `jsonls`, `lua_ls`, `tailwindcss`, `vtsls`, `vue_ls`
+- Vue 3 single-file components via `vue_ls` + `vtsls` with the Vue TypeScript plugin.
 - Enhanced LSP UIs through [`lspsaga.nvim`](https://github.com/nvimdev/lspsaga.nvim).
 - Completion item pictograms with [`lspkind-nvim`](https://github.com/onsails/lspkind-nvim).
-- Code context display using [`nvim-navic`](https://github.com/SmiteshP/nvim-navic).
 
 ### Treesitter Configuration
-- Syntax highlighting and parsing powered by [`nvim-treesitter`](https://github.com/nvim-treesitter/nvim-treesitter) on the latest main branch.
-- Installed parsers include:
-  - `markdown`, `regex`, `markdown_inline`, `tsx`, `typescript`, `toml`, `fish`, `php`, `json`, `yaml`, `swift`, `vue`, `css`, `html`, `lua`, `bash`
-- Autostarts Treesitter highlighting for filetypes: `ruby`, `vue`, `typescript`, `tsx`, and `javascript`.
+- Syntax highlighting and parsing powered by [`nvim-treesitter`](https://github.com/nvim-treesitter/nvim-treesitter) (`master` branch; the `main` rewrite requires Neovim 0.12 nightly).
+- Auto-installed parsers include:
+  - `bash`, `css`, `fish`, `html`, `javascript`, `json`, `lua`, `markdown`, `markdown_inline`, `php`, `regex`, `ruby`, `swift`, `toml`, `tsx`, `typescript`, `vue`, `yaml`
 
 ### Command Line & Notifications
 - Enhanced command line UI with [`noice.nvim`](https://github.com/folke/noice.nvim) plus dependencies [`nui.nvim`](https://github.com/MunifTanjim/nui.nvim) and [`nvim-notify`](https://github.com/rcarriga/nvim-notify).
