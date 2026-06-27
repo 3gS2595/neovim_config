@@ -9,6 +9,7 @@ return {
       local orange = '#ff6600'
       local red = '#870000'
 
+      -- MODE COLORS
       custom_theme.normal.a.bg = red
       custom_theme.visual.a.bg = '#be19e8'
       custom_theme.insert.a.bg = orange
@@ -18,13 +19,17 @@ return {
       custom_theme.replace.a.fg = red
       custom_theme.normal.a.fg = orange
 
+      -- SECTION B + C FIX
       for _, mode in ipairs({ 'inactive', 'visual', 'normal', 'insert', 'command', 'replace' }) do
         custom_theme[mode].b.bg = yellow
         custom_theme[mode].b.fg = red
-        custom_theme[mode].c.bg = '#000000'
+
+        -- 🔥 FIX: allow transparency in center section
+        custom_theme[mode].c.bg = 'NONE'
         custom_theme[mode].c.fg = orange
       end
-      custom_theme.insert.c.bg = yellow
+
+      custom_theme.insert.c.bg = 'NONE'
 
       require('lualine').setup({
         options = {
@@ -36,6 +41,7 @@ return {
             right = '',
           },
         },
+
         sections = {
           lualine_a = { 'mode' },
           lualine_b = { 'diff', 'diagnostics' },
@@ -44,6 +50,7 @@ return {
           lualine_y = { 'encoding', 'fileformat', 'filetype' },
           lualine_z = { 'branch' },
         },
+
         tabline = {
           lualine_a = {
             {
@@ -66,6 +73,7 @@ return {
           },
           lualine_z = { 'tabs' },
         },
+
         winbar = {
           lualine_a = {
             {
@@ -81,14 +89,55 @@ return {
               end,
             },
           },
+          lualine_c = {
+            {
+              function()
+                return require('baseline.banners').winbar()
+              end,
+              color = { fg = require('baseline.banners').config.fg },
+            },
+          },
           lualine_y = { 'progress' },
           lualine_z = { 'location' },
         },
+
         inactive_winbar = {
+          lualine_c = {
+            {
+              function()
+                return require('baseline.banners').winbar()
+              end,
+              color = { fg = require('baseline.banners').config.fg },
+            },
+          },
           lualine_y = { 'progress' },
           lualine_z = { 'location' },
         },
       })
+
+      -- Keep the colored mode sections (red 'a'/'z', yellow 'b'/'y') but make
+      -- the center/title bars transparent. lualine's own center fill already
+      -- rides on lualine_c (bg=NONE). What's left are the *native* statusline,
+      -- winbar and tabline groups, which the colorscheme repaints to black/gray.
+      -- The colorscheme is applied AFTER this config runs, so reapply on every
+      -- ColorScheme event (and once now) to keep these groups transparent.
+      local function transparent_bars()
+        for _, name in ipairs({
+          'WinBar', 'WinBarNC',
+          'TabLine', 'TabLineFill', 'TabLineSel',
+          'StatusLine', 'StatusLineNC',
+        }) do
+          local hl = vim.api.nvim_get_hl(0, { name = name, link = false })
+          hl.bg = 'NONE'
+          vim.api.nvim_set_hl(0, name, hl)
+        end
+      end
+
+      vim.api.nvim_create_autocmd('ColorScheme', {
+        group = vim.api.nvim_create_augroup('TransparentBars', { clear = true }),
+        callback = transparent_bars,
+      })
+      transparent_bars()
     end,
   },
 
@@ -137,9 +186,13 @@ return {
         'Conditional', 'Repeat', 'Operator', 'Structure', 'LineNr', 'NonText',
         'SignColumn', 'CursorLine', 'CursorLineNr', 'StatusLine', 'StatusLineNC',
         'EndOfBuffer',
+
+        -- 🔥 IMPORTANT: add winbar too
+        'WinBar',
+        'WinBarNC',
       },
       extra_groups = {
-        'NormalFloat',   -- plugins which have float panel such as Lazy, Mason, LspInfo
+        'NormalFloat',
         'NvimTreeNormal',
       },
     },
@@ -159,7 +212,6 @@ return {
     dependencies = { 'MunifTanjim/nui.nvim', 'rcarriga/nvim-notify' },
     opts = {
       lsp = {
-        -- override markdown rendering so that cmp and other plugins use Treesitter
         override = {
           ['vim.lsp.util.convert_input_to_markdown_lines'] = true,
           ['vim.lsp.util.stylize_markdown'] = true,
