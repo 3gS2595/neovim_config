@@ -25,19 +25,20 @@ local M = {}
 
 M.config = {
   -- Horizontal banner parts (strings).
-  h_start = '☾ ⋆*･ﾟ:',
-  h_filler = '♡ ⋆*･ﾟ: ', -- repeated on both sides of the centerpiece
-  h_middle = '⋆ ♡ ⋆', -- centerpiece, kept in the middle ('' to omit)
+  h_start = ' ♡ ',
+  h_middle = ' ♡ ', -- centerpiece, kept in the middle ('' to omit)
+  h_filler = ' ♡ ', -- repeated on both sides of the centerpiece
+  h_middle = ' ♡ ', -- centerpiece, kept in the middle ('' to omit)
   h_end = ':⋆ .⋆',
   -- Columns kept free for the winbar's own sections when filling the banner.
   reserve = 30,
 
   -- Vertical banner parts (lists; each entry MUST be a single display cell,
   -- because a 1-column float clips wider glyphs).
-  v_top = { '☾', '⋆', '♡' }, -- static top sequence
-  v_filler = { '⋆', '*', '♡', 'ﾟ', ':' }, -- repeated above and below the centerpiece
-  v_middle = { '⋆', '♡', '⋆' }, -- centerpiece, centered vertically ({} to omit)
-  v_bot = { '♡', '⋆', '.' }, -- static bottom sequence
+  v_top = {'♡' }, -- static top sequence
+  v_filler ={'♡'}, -- repeated above and below the centerpiece
+  v_middle = {'♡'}, -- centerpiece, centered vertically ({} to omit)
+  v_bot = {'♡'}, -- static bottom sequence
   -- Single glyph for the NATIVE vertical line when the overlay is off (fallback).
   v_glyph = '⋆',
   -- Manual alignment nudges if the overlay sits a row off from the separator.

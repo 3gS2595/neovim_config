@@ -51,27 +51,10 @@ return {
           lualine_z = { 'branch' },
         },
 
+        -- Buffers now live per-pane in each window's winbar (baseline.panetabs),
+        -- so the global tabline only shows tab pages.
         tabline = {
-          lualine_a = {
-            {
-              'buffers',
-              show_filename_only = false,
-              hide_filename_extension = false,
-              show_modified_status = true,
-              mode = 2,
-              max_length = vim.o.columns * 2 / 3,
-              filetype_names = {
-                TelescopePrompt = 'Telescope',
-              },
-              use_mode_colors = true,
-              symbols = {
-                modified = ' ●',
-                alternate_file = '#',
-                directory = '',
-              },
-            },
-          },
-          lualine_z = { 'tabs' },
+          lualine_a = { 'tabs' },
         },
 
         winbar = {
@@ -79,6 +62,10 @@ return {
             {
               'diagnostics',
               update_in_insert = true,
+              -- Hidden on tabbed panes (code/terminal) so the tabs sit flush.
+              cond = function()
+                return not require('baseline.panetabs').is_tabbed()
+              end,
             },
             {
               function()
@@ -86,32 +73,32 @@ return {
               end,
               cond = function()
                 return require('nvim-navic').is_available()
+                  and not require('baseline.panetabs').is_tabbed()
               end,
             },
           },
           lualine_c = {
             {
+              -- Per-pane buffer tabs on tagged panes, heart banner elsewhere.
               function()
-                return require('baseline.banners').winbar()
+                return require('baseline.panetabs').winbar()
               end,
+              padding = 0, -- flush at col 0 so row-2 overlay lines up
               color = { fg = require('baseline.banners').config.fg },
             },
           },
-          lualine_y = { 'progress' },
-          lualine_z = { 'location' },
         },
 
         inactive_winbar = {
           lualine_c = {
             {
               function()
-                return require('baseline.banners').winbar()
+                return require('baseline.panetabs').winbar()
               end,
+              padding = 0, -- flush at col 0 so row-2 overlay lines up
               color = { fg = require('baseline.banners').config.fg },
             },
           },
-          lualine_y = { 'progress' },
-          lualine_z = { 'location' },
         },
       })
 

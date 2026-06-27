@@ -33,23 +33,6 @@ return {
     dependencies = { 'nvim-tree/nvim-web-devicons' },
     config = function()
       local api = require('nvim-tree.api')
-      local bufutil = require('baseline.bufutil')
-
-      -- Open the file under the cursor, then wipe the buffer it replaced so that
-      -- clicking around the tree doesn't pile up buffers in the tabline. The
-      -- replaced buffer is kept if it's modified or shown elsewhere (bufutil).
-      local function open_replace()
-        local before = {}
-        for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-          before[w] = vim.api.nvim_win_get_buf(w)
-        end
-        api.node.open.edit()
-        local w = vim.api.nvim_get_current_win()
-        local prev = before[w]
-        if prev and prev ~= vim.api.nvim_get_current_buf() then
-          bufutil.wipe_if_unused(prev)
-        end
-      end
 
       local function on_attach(bufnr)
         local function opts(desc)
@@ -61,12 +44,9 @@ return {
           }
         end
 
+        -- Default open mappings: opened files persist as tabs in the code
+        -- pane's winbar (baseline.panetabs) rather than replacing each other.
         api.config.mappings.default_on_attach(bufnr)
-
-        -- Replace-on-open for the usual "open file" mappings.
-        vim.keymap.set('n', '<CR>', open_replace, opts('Open: replace buffer'))
-        vim.keymap.set('n', 'o', open_replace, opts('Open: replace buffer'))
-        vim.keymap.set('n', '<2-LeftMouse>', open_replace, opts('Open: replace buffer'))
 
         vim.keymap.set('n', '<C-t>', api.tree.change_root_to_parent, opts('Up'))
         vim.keymap.set('n', '?', api.tree.toggle_help, opts('Help'))

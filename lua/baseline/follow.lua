@@ -10,7 +10,6 @@
 -- pruned directories in M.config.prune. Toggle with :FollowClaude.
 
 local uv = vim.uv
-local bufutil = require('baseline.bufutil')
 local M = {}
 
 M.config = {
@@ -83,11 +82,6 @@ local function show(path)
     move_cursor(win, line)
   end
   state.snap[path] = new_lines
-
-  -- Don't let followed files pile up in the buffer tabline.
-  if not same then
-    bufutil.wipe_if_unused(old_buf)
-  end
 end
 
 local function on_result(res)
