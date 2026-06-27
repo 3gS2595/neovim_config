@@ -5,6 +5,7 @@ require('baseline.platform')
 require('baseline.commands')
 require('baseline.banners').setup()
 require('baseline.panetabs').setup()
+require('baseline.portrait').setup()
 require('baseline.layout').setup()
 
 -- Bootstrap lazy.nvim

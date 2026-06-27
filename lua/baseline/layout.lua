@@ -47,13 +47,11 @@ local function build()
   vim.o.splitright = true
   vim.o.splitbelow = true
 
-  local panetabs = require('baseline.panetabs')
-
   local code = vim.api.nvim_get_current_win()
-  -- Top-left pane shows the project README when there is one, and lists open
-  -- file buffers as tabs in its winbar.
+  -- Top-left pane shows the project README when there is one. Every pane lists
+  -- its buffers as tabs automatically (baseline.panetabs derives the role from
+  -- the buffer), so no pane needs tagging here.
   open_readme()
-  panetabs.set_role(code, 'files')
 
   -- Three columns: code | center | right.
   vim.cmd('vsplit')
@@ -61,21 +59,18 @@ local function build()
   vim.cmd('vsplit')
   local right = vim.api.nvim_get_current_win()
 
-  -- Right column: a terminal running Claude. Keep it out of the terminal tabs
-  -- so the bottom-left pane's tabs only show terminals you open there.
+  -- Right column: a terminal running Claude. It shares the terminal tabs with
+  -- the bottom-left pane (every terminal pane lists all terminals).
   vim.api.nvim_set_current_win(right)
   open_terminal('claude --dangerously-skip-permissions')
-  panetabs.exclude_buf(vim.api.nvim_get_current_buf())
 
-  -- Center column: the file tree, opened in this window (not its side panel).
+  -- Center column: file tree (top) / square portrait pane / empty (bottom).
   vim.api.nvim_set_current_win(center)
-  require('nvim-tree.api').tree.open({ current_window = true })
+  require('baseline.portrait').setup_center(center)
 
-  -- Left column, bottom half: a terminal running `c`, below the code view. Its
-  -- winbar lists terminal buffers as tabs.
+  -- Left column, bottom half: a terminal running `c`, below the code view.
   vim.api.nvim_set_current_win(code)
   vim.cmd('split')
-  panetabs.set_role(vim.api.nvim_get_current_win(), 'terms')
   open_terminal('c')
 
   -- Even out the columns and land the cursor in the code view.

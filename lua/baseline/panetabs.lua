@@ -66,13 +66,41 @@ end
 
 -- Window/buffer tagging -----------------------------------------------------
 
+-- Force a window's role, or false to opt it out of tabs entirely. Optional --
+-- roles are normally auto-derived from the buffer (see role_of), so tabs appear
+-- on every pane without tagging; this just overrides that.
 function M.set_role(win, role)
   pcall(vim.api.nvim_win_set_var, win, 'pane_tabs', role)
 end
 
+-- A pane's role is derived from the buffer it currently shows, so tabs appear
+-- automatically on every normal pane (and any split opened later):
+--   terminal buffer          -> 'terms'  (terminal tabs)
+--   normal file buffer ('')  -> 'files'  (file tabs)
+--   anything else            -> nil      (no tabs)
+-- "Anything else" covers floats (our overlays, telescope, noice) and special
+-- buffers -- the file tree, help, quickfix, prompts -- which all carry a
+-- non-empty buftype. set_role overrides this (a role string, or false to opt
+-- out).
 local function role_of(win)
-  local ok, r = pcall(vim.api.nvim_win_get_var, win, 'pane_tabs')
-  return ok and r or nil
+  if not (win and vim.api.nvim_win_is_valid(win)) then
+    return nil
+  end
+  local ok, override = pcall(vim.api.nvim_win_get_var, win, 'pane_tabs')
+  if ok and override ~= nil then
+    return override or nil -- string forces a role; false opts out
+  end
+  if vim.api.nvim_win_get_config(win).relative ~= '' then
+    return nil
+  end
+  local bt = vim.bo[vim.api.nvim_win_get_buf(win)].buftype
+  if bt == 'terminal' then
+    return 'terms'
+  end
+  if bt ~= '' then
+    return nil
+  end
+  return 'files'
 end
 
 function M.exclude_buf(buf)
@@ -206,29 +234,53 @@ local function destroy_header(cwin)
   end
 end
 
--- Click handler bound to each title float; resolves the click column to a tab.
-function M._click(cwin)
-  local h = ov.headers[cwin]
-  if not h then
-    return
-  end
+-- Left-click router for the title floats (wired as ONE global mapping in
+-- M.setup). A click is resolved by matching the moused-over window
+-- (getmousepos) to a header float, then the click column to that float's tab
+-- ranges -- crucially using the window UNDER THE MOUSE, not the focused one.
+--
+-- This must be global, not a buffer-local map on each float: a buffer-local
+-- <LeftMouse> only fires once its buffer is already the current one, so clicking
+-- a tab in an *unfocused* pane never triggered that pane's handler -- it acted on
+-- whichever pane happened to be focused (the "wrong pane/tab" confusion).
+--
+-- Returns true when the click landed on one of our floats (so the caller
+-- suppresses the default click and we don't focus the 1-row overlay), false to
+-- let Neovim handle the click normally.
+function M._click()
   local mp = vim.fn.getmousepos()
-  if mp.winid == h.win then
-    local col = mp.wincol - 1
-    for _, c in ipairs(h.clicks) do
-      if col >= c.d0 and col < c.d1 then
-        if col >= c.x0 and col < c.x1 then
-          M.close_buf(h.content, c.buf, h.role)
-        else
-          pcall(vim.api.nvim_win_set_buf, h.content, c.buf)
-        end
-        break
-      end
+  local h
+  for _, hh in pairs(ov.headers) do
+    if hh.win == mp.winid then
+      h = hh
+      break
     end
   end
-  if vim.api.nvim_win_is_valid(h.content) then
-    pcall(vim.api.nvim_set_current_win, h.content) -- never rest focus in the float
+  if not h then
+    return false -- not one of our floats: default click behaviour
   end
+  local col = mp.wincol - 1
+  for _, c in ipairs(h.clicks) do
+    if col >= c.d0 and col < c.d1 then
+      local content, buf, role = h.content, c.buf, h.role
+      local close = col >= c.x0 and col < c.x1
+      -- Defer the switch: this is called from an <expr> mapping, where changing
+      -- the window/buffer is blocked by textlock (E565).
+      vim.schedule(function()
+        if not vim.api.nvim_win_is_valid(content) then
+          return
+        end
+        if close then
+          M.close_buf(content, buf, role)
+        elseif vim.api.nvim_buf_is_valid(buf) then
+          pcall(vim.api.nvim_win_set_buf, content, buf)
+        end
+        pcall(vim.api.nvim_set_current_win, content) -- focus the clicked pane
+      end)
+      break
+    end
+  end
+  return true -- our float (even on the empty fill): swallow the default click
 end
 
 local function paint(buf, title, thl)
@@ -248,7 +300,12 @@ local function update_header(cwin, role)
     destroy_header(cwin)
     return
   end
-  local sig = table.concat({ row, col, width, title }, '|')
+  -- The float is only repainted when this signature changes. Include the pane's
+  -- current buffer: switching the active tab moves the active-tab highlight even
+  -- though the tab *text* (title) is unchanged, so title alone would skip the
+  -- repaint and leave the bottom row's active colour stale. (Row 1's winbar
+  -- carries inline highlights, so lualine repaints it every redraw regardless.)
+  local sig = table.concat({ row, col, width, vim.api.nvim_win_get_buf(cwin), title }, '|')
   local h = ov.headers[cwin]
   if h and vim.api.nvim_win_is_valid(h.win) then
     h.content, h.role, h.clicks = cwin, role, clicks
@@ -275,7 +332,7 @@ local function update_header(cwin, role)
     col = col,
     width = width,
     height = 1,
-    focusable = true, -- needed to receive the click; focus is bounced back
+    focusable = true, -- required so getmousepos() resolves clicks to this float
     zindex = 35,
     style = 'minimal',
     noautocmd = true,
@@ -283,9 +340,9 @@ local function update_header(cwin, role)
   if ok then
     vim.wo[win].winhighlight = 'Normal:PaneTabBar'
     ov.headers[cwin] = { win = win, buf = buf, sig = sig, content = cwin, role = role, clicks = clicks }
-    vim.keymap.set('n', '<LeftMouse>', function()
-      M._click(cwin)
-    end, { buffer = buf, nowait = true, silent = true })
+    -- Clicks are handled by the single global <LeftMouse> map (see M.setup),
+    -- which routes by getmousepos(); a buffer-local map here would only fire
+    -- when this float is already focused.
   end
 end
 
@@ -361,6 +418,15 @@ function M.setup()
     'TermOpen',
     'BufModifiedSet',
   }, { group = group, callback = schedule })
+
+  -- One global click router for the tab floats. <expr> so we can fall through
+  -- to a normal click (return '<LeftMouse>') when the mouse isn't over a float;
+  -- buffer-local maps (nvim-tree etc.) still take precedence over this. Mapped
+  -- in terminal-mode too so the terminal pane's tabs are clickable while typing
+  -- (the click drops the terminal to normal mode; press i/a to resume).
+  vim.keymap.set({ 'n', 't' }, '<LeftMouse>', function()
+    return M._click() and '' or '<LeftMouse>'
+  end, { expr = true, desc = 'Pane tab click' })
 
   vim.keymap.set('n', '<leader>bd', function()
     local w = vim.api.nvim_get_current_win()
