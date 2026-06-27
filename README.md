@@ -52,9 +52,6 @@ colors/                   -- wildcharm-redux colorscheme
 - Advanced autocompletion using [`nvim-cmp`](https://github.com/hrsh7th/nvim-cmp) with LSP, buffer, and path sources.
 - Snippet support via [`LuaSnip`](https://github.com/L3MON4D3/LuaSnip).
 
-### AI Assistance
-- [Claude Code](https://github.com/coder/claudecode.nvim) integration (`<leader>ac` to toggle, `<leader>as` to send a selection), powered by [`snacks.nvim`](https://github.com/folke/snacks.nvim).
-
 ### Language Server Protocol (LSP) Setup
 - Native `vim.lsp.config` setup on Neovim 0.11+, with servers managed by [`mason.nvim`](https://github.com/mason-org/mason.nvim) and auto-enabled by [`mason-lspconfig.nvim`](https://github.com/mason-org/mason-lspconfig.nvim).
 - Automatically ensures the following LSP servers are installed:
