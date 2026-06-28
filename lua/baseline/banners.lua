@@ -161,16 +161,26 @@ local function redraw()
     for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
       if api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' then
         local pos = api.nvim_win_get_position(win)
-        local row, col = pos[1], pos[2] + api.nvim_win_get_width(win)
-        local height = api.nvim_win_get_height(win)
+        local col = pos[2] + api.nvim_win_get_width(win)
         -- Only windows with a neighbour to the right have a separator.
         if col < vim.o.columns then
-          -- The separator also spans the winbar row above the text area.
+          -- pos[1] is the window's TOP row -- already the winbar row when the
+          -- window has a winbar (text sits one below), so the separator starts
+          -- right there. The old code subtracted a row here on the assumption
+          -- pos[1] was the text row; that drew every winbar pane a row too high
+          -- (onto the tabline) and a row short at the bottom, and misaligned it
+          -- against winbar-less panes like the file tree.
+          local top = pos[1]
+          local height = api.nvim_win_get_height(win)
           if api.nvim_get_option_value('winbar', { win = win }) ~= '' then
-            row = row - 1
-            height = height + 1
+            height = height + 1 -- cover the winbar row above the text
           end
-          draw_one(row + c.v_row_offset, col, height + c.v_height_offset)
+          -- Stop above a global statusline (laststatus=3): nvim_win_get_height
+          -- doesn't subtract it, so a bottom-band pane would otherwise spill a
+          -- glyph onto the statusline row.
+          local last = vim.o.lines - 1 - (vim.o.laststatus == 3 and 1 or 0)
+          local bottom = math.min(top + height - 1, last)
+          draw_one(top + c.v_row_offset, col, bottom - top + 1 + c.v_height_offset)
         end
       end
     end

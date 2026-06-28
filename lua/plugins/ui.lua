@@ -36,6 +36,10 @@ return {
           theme = custom_theme,
           globalstatus = true,
           icons_enabled = true,
+          -- The portrait engine's structural panes (square + empty) carry this
+          -- filetype; skip their winbar so no banner/separator line is drawn
+          -- beneath the portrait (baseline/portrait.lua).
+          disabled_filetypes = { winbar = { 'portrait' } },
           section_separators = {
             left = '',
             right = '',
@@ -51,11 +55,8 @@ return {
           lualine_z = { 'branch' },
         },
 
-        -- Buffers now live per-pane in each window's winbar (baseline.panetabs),
-        -- so the global tabline only shows tab pages.
-        tabline = {
-          lualine_a = { 'tabs' },
-        },
+        -- Buffers live per-pane in each window's winbar (baseline.panetabs);
+        -- the global tabline is disabled (showtabline = 0) so no top line shows.
 
         winbar = {
           lualine_a = {
