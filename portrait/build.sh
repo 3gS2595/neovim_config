@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Build the portrait pose atlas: render the head across a yaw x pitch grid into
-# atlas/pose_<yi>_<pi>.png. The grid + angle formula MUST match
-# baseline/portrait.lua (yaw_steps/pitch_steps/max_yaw/max_pitch and angle()).
+# Build the portrait pose sheet: render the head across a yaw x pitch grid, then
+# montage every pose into ONE sprite sheet (atlas/sheet.png) -- a yaw_steps-wide,
+# pitch_steps-tall grid of SIZE x SIZE cells. The runtime (baseline/portrait.lua)
+# transmits that single sheet once and crops a cell per frame, so the grid layout
+# MUST match: column = yaw index, row = pitch index, no spacing. yaw_steps/
+# pitch_steps and the angle() formula must match portrait.lua / build.sh too.
 #
 #   ./build.sh [obj] [size]
 set -euo pipefail
@@ -36,3 +39,18 @@ for ((yi=0; yi<YAW_STEPS; yi++)); do
   done
 done
 echo "built $count poses -> atlas/ (size ${SIZE})"
+
+# Montage every pose into one sprite sheet. The runtime crops cells by (yaw,pitch)
+# index, so the order MUST be row-major with pitch as the row and yaw as the column:
+# pi outer (rows), yi inner (columns). -geometry +0+0 packs the SIZE x SIZE tiles
+# with zero spacing so cell (yi,pi) sits at exactly (yi*SIZE, pi*SIZE); -background
+# none keeps the keyed-out background transparent.
+tiles=()
+for ((pi=0; pi<PITCH_STEPS; pi++)); do
+  for ((yi=0; yi<YAW_STEPS; yi++)); do
+    tiles+=("atlas/pose_${yi}_${pi}.png")
+  done
+done
+magick montage "${tiles[@]}" -tile "${YAW_STEPS}x${PITCH_STEPS}" -geometry +0+0 \
+  -background none "atlas/sheet.png"
+echo "montaged -> atlas/sheet.png ($((YAW_STEPS*SIZE))x$((PITCH_STEPS*SIZE)))"
