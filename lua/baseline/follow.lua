@@ -1,47 +1,47 @@
--- Make a "viewer" window replay every file Claude touches under the working dir
--- as a typing animation, without moving focus. A timer polls (via a non-blocking
--- `find`) for all files modified since the follower started, queues each change,
--- and plays them back one at a time in the viewer window. Files that already
--- existed at startup are ignored until Claude edits them, so it won't hijack the
--- initial README. Toggle with :FollowClaude.
+-- Make a "viewer" window replay every file *Claude* edits as a typing animation,
+-- without moving focus. Claude Code hooks (see ~/.claude/hooks/follow-snapshot.py)
+-- record each Edit/Write/MultiEdit: the file's pre-edit contents are snapshotted
+-- and the completed edit is appended to "<project>/.claude/follow/queue". A timer
+-- tails that queue and plays each change back, one at a time, in the viewer.
 --
--- Why a replay works: by the time we poll, Claude's edit is already complete on
--- disk, so we have both endpoints -- the previous snapshot (or empty, for a file
--- we've never shown) and the new file -- and can type the change out. The replay
--- is destructive on the *mirror buffer* only, which is safe: Claude writes the
--- disk file, never this buffer, and we reload the real file from disk (`edit!`)
--- as the final commit, discarding any animation artifacts.
+-- Why the hook (vs. polling `find` for modified files): only files Claude actually
+-- edits ever reach the viewer, so unrelated writers -- Rails logs, build output,
+-- watchers -- can no longer hijack it. And because the hook hands us the exact
+-- "before" contents, we animate just the changed lines instead of re-typing the
+-- whole file the first time we display it.
+--
+-- The replay is destructive on the *mirror buffer* only, which is safe: Claude
+-- writes the disk file, never this buffer, and we reload the real file from disk
+-- (`edit!`) as the final commit, discarding any animation artifacts.
 --
 -- The budget scales chars-per-tick to the change size, so typing a brand-new
 -- 500-line file finishes in roughly the same time as a one-line diff.
+-- Toggle with :FollowClaude.
 
 local uv = vim.uv
 local M = {}
 
 M.config = {
   enabled = true,
-  interval = 1000, -- poll period in ms
-  prune = { '.git', 'node_modules', '.cache' }, -- directories to ignore
+  interval = 500, -- queue poll period in ms
   animate = true, -- replay edits as a typing animation
   char_interval = 18, -- typing tick period in ms
   budget_ticks = 40, -- target number of ticks per file (scales typing speed)
 }
 
--- `seen` maps path -> last processed mtime so we re-queue a file only when it
--- actually changes. `queue`/`queued` is the ordered playback queue (with a set
--- for dedupe). `snap` maps path -> the lines last shown, used as the "before"
--- for the next edit. `dirty` is the buffer an animation made modified, tracked
--- so we can clean it before any plain reload.
+-- `queue`/`queue_line` track the ordered playback queue and how far we've read
+-- into the on-disk queue log. `snap` maps path -> the lines last shown, a fallback
+-- "before" when a hook snapshot is missing. `dirty` is the buffer an animation
+-- made modified, tracked so we can clean it before any plain reload.
 local state = {
   win = nil,
   timer = nil,
   anim = nil,
-  start = 0,
-  scanning = false,
   animating = false,
-  seen = {},
-  queue = {},
-  queued = {},
+  dir = nil, -- "<project>/.claude/follow"
+  queue_path = nil, -- "<dir>/queue"
+  queue_line = 0, -- lines of the queue log already consumed
+  queue = {}, -- pending entries: { id = ..., path = ... }
   snap = {},
   dirty = nil,
 }
@@ -162,7 +162,7 @@ local function animate(win, path, before, after)
   pcall(function()
     vim.bo[buf].modifiable = true
   end)
-  -- Show the "before" (empty for a file we've never displayed).
+  -- Show the "before" (empty for a file the edit created).
   pcall(vim.api.nvim_buf_set_lines, buf, 0, -1, false, before)
 
   local f, old_end, new_end = diff_range(before, after)
@@ -225,10 +225,26 @@ local function animate(win, path, before, after)
   )
 end
 
--- Play one queued file: open it in the viewer, then animate (or snap) the change
--- from its last snapshot (or empty) to the current disk contents.
-local function process(path)
+-- Read the hook's pre-edit snapshot for `id` (then delete it). Returns the lines,
+-- or nil when there's no snapshot. An empty snapshot file -> {} (a created file).
+local function take_before(id)
+  if not id then
+    return nil
+  end
+  local file = state.dir .. '/snap/' .. id .. '.before'
+  local ok, lines = pcall(vim.fn.readfile, file)
+  os.remove(file)
+  if ok and lines then
+    return lines
+  end
+  return nil
+end
+
+-- Play one queued edit: open its file in the viewer, then animate (or snap) from
+-- the hook's pre-edit snapshot (or our last snapshot, or empty) to disk contents.
+local function process(entry)
   local win = state.win
+  local path = entry.path
   if not (win and vim.api.nvim_win_is_valid(win)) then
     finish_step()
     return
@@ -240,7 +256,7 @@ local function process(path)
     return
   end
 
-  local old_lines = state.snap[path] or {}
+  local old_lines = take_before(entry.id) or state.snap[path] or {}
 
   -- Open the file in the viewer (this creates a listed buffer for it).
   clear_dirty()
@@ -252,7 +268,7 @@ local function process(path)
     return
   end
 
-  -- No visible change (e.g. mtime touched but content identical): just record.
+  -- No visible change (e.g. a formatting touch with identical lines): just record.
   if same_lines(old_lines, new_lines) then
     state.snap[path] = new_lines
     finish_step()
@@ -271,60 +287,40 @@ local function process(path)
   end
 end
 
--- Pop the next queued file and play it, one at a time.
+-- Pop the next queued edit and play it, one at a time.
 drain = function()
   if state.animating or not M.config.enabled then
     return
   end
-  local path = table.remove(state.queue, 1)
-  if not path then
+  local entry = table.remove(state.queue, 1)
+  if not entry then
     return
   end
-  state.queued[path] = nil
   state.animating = true
-  process(path)
+  process(entry)
 end
 
-local function enqueue(path)
-  if not state.queued[path] then
-    state.queued[path] = true
-    state.queue[#state.queue + 1] = path
-  end
-end
-
-local function on_result(res)
-  state.scanning = false
-  if res.code ~= 0 or not res.stdout or res.stdout == '' then
+-- Tail new lines from the queue log into the playback queue. Each line is
+-- "<id>\t<abspath>". We stop at the first malformed line (a partially written
+-- trailing entry) and retry it next poll, so we never skip a real edit.
+local function read_queue()
+  local ok, lines = pcall(vim.fn.readfile, state.queue_path)
+  if not ok or not lines then
     return
   end
-  -- `find` output is sorted ascending by mtime, so we queue in edit order.
-  for ln in res.stdout:gmatch('[^\n]+') do
-    local mtime, path = ln:match('^(%S+)%s+(.+)$')
-    mtime = tonumber(mtime)
-    if mtime and path and mtime > state.start then
-      if not state.seen[path] or mtime > state.seen[path] then
-        state.seen[path] = mtime
-        enqueue(path)
-      end
+  if #lines < state.queue_line then
+    state.queue_line = 0 -- log was rotated/truncated
+  end
+  local last = state.queue_line
+  for i = state.queue_line + 1, #lines do
+    local id, path = lines[i]:match('^(%S+)\t(.+)$')
+    if not (id and path) then
+      break
     end
+    state.queue[#state.queue + 1] = { id = id, path = path }
+    last = i
   end
-  drain()
-end
-
--- `find <cwd> -type f <prunes> -newermt @<start> -printf '<mtime> <path>\n' | sort -n`
-local function build_cmd()
-  local prunes = {}
-  for _, d in ipairs(M.config.prune) do
-    prunes[#prunes + 1] = '-not -path ' .. vim.fn.shellescape('*/' .. d .. '/*')
-  end
-  local sh = 'find '
-    .. vim.fn.shellescape(uv.cwd())
-    .. ' -type f '
-    .. table.concat(prunes, ' ')
-    .. ' -newermt '
-    .. vim.fn.shellescape('@' .. tostring(state.start))
-    .. " -printf '%T@ %p\\n' 2>/dev/null | sort -n"
-  return { 'sh', '-c', sh }
+  state.queue_line = last
 end
 
 local function scan()
@@ -335,11 +331,8 @@ local function scan()
     M.stop() -- viewer window is gone
     return
   end
-  if state.scanning then
-    return -- previous find still running
-  end
-  state.scanning = true
-  vim.system(build_cmd(), { text = true }, vim.schedule_wrap(on_result))
+  read_queue()
+  drain()
 end
 
 local function stop_timer()
@@ -350,17 +343,45 @@ local function stop_timer()
   end
 end
 
+-- Normalise a path so both sides hash an identical string cross-platform:
+-- real path, forward slashes, no trailing slash, lowercased. Must mirror the
+-- hook's normalisation exactly (see follow-snapshot.py) or they'd diverge on
+-- Windows (backslashes / mixed drive-letter case) and never meet.
+local function norm_path(p)
+  p = uv.fs_realpath(p) or p
+  p = p:gsub('\\', '/')
+  p = p:gsub('/+$', '')
+  return p:lower()
+end
+
+-- The follow directory the hook writes to: a per-project subdir of the user
+-- state dir, keyed by a hash of the project root (git top-level, matching the
+-- hook's $CLAUDE_PROJECT_DIR). Nothing is written into the project.
+local function follow_dir()
+  local root = uv.cwd()
+  local out = vim.fn.systemlist({ 'git', '-C', root, 'rev-parse', '--show-toplevel' })
+  if vim.v.shell_error == 0 and out[1] and out[1] ~= '' then
+    root = out[1]
+  end
+  local state_root = os.getenv('XDG_STATE_HOME')
+  if not state_root or state_root == '' then
+    state_root = uv.os_homedir() .. '/.local/state' -- HOME is unset on Windows
+  end
+  return state_root .. '/claude-follow/' .. vim.fn.sha256(norm_path(root))
+end
+
 -- Begin following: `win` is the viewer window to keep in sync.
 function M.start(win)
   vim.o.autoread = true
   state.win = win
-  state.start = os.time()
-  state.scanning = false
   state.animating = false
-  state.seen = {}
   state.queue = {}
-  state.queued = {}
   state.snap = {}
+  state.dir = follow_dir()
+  state.queue_path = state.dir .. '/queue'
+  -- Ignore edits already logged before we started following.
+  local ok, lines = pcall(vim.fn.readfile, state.queue_path)
+  state.queue_line = (ok and lines) and #lines or 0
   -- Highlight the viewer's current line so the typed-into region stands out.
   pcall(vim.api.nvim_set_option_value, 'cursorline', true, { win = win })
   stop_timer()
@@ -390,7 +411,6 @@ function M.stop()
   stop_timer()
   state.animating = false
   state.queue = {}
-  state.queued = {}
   state.win = nil
 end
 

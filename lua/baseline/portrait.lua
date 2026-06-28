@@ -1,16 +1,21 @@
--- Tree column = file tree (top) / square "portrait" pane (bottom).
+-- Tree column = square "portrait" pane (top) / file tree (middle) / square
+-- "portrait" pane (bottom).
 --
---   +-----------+
---   | file tree |   <- nvim-tree (top), grows to fill the space above
---   |           |
 --   +-----------+
 --   |  PORTRAIT |   <- square pane: a 3D head that looks toward the mouse,
---   |  (square) |      pinned to the BOTTOM of the column
+--   |  (square) |      pinned to the TOP of the column
+--   +-----------+
+--   | file tree |   <- nvim-tree (middle), grows to fill the space between
+--   |           |
+--   +-----------+
+--   |  PORTRAIT |   <- square pane pinned to the BOTTOM of the column
+--   |  (square) |
 --   +-----------+
 --
--- The head tracks the mouse live: 'mousemoveevent' + a <MouseMove> map feed
--- getmousepos() into a direction, which selects the nearest precomputed viewing
--- angle ("pose") and shows that pose over the square pane.
+-- Both heads track the mouse live: 'mousemoveevent' + a <MouseMove> map feed
+-- getmousepos() into a direction PER PANE (each relative to its own centre),
+-- which selects the nearest precomputed viewing angle ("pose") and shows that
+-- pose over that pane.
 --
 -- DESIGN -- one sheet, crop per frame. Poses are precomputed offline into a single
 -- sprite SHEET: a yaw_steps x pitch_steps grid of head renders packed into one PNG
@@ -19,19 +24,21 @@
 --
 --   1. TRANSMIT the sheet to the terminal ONCE, at attach (kitty graphics protocol,
 --      f=100 raw PNG). It's the only expensive step and it happens before the user
---      interacts, so there is no warm-up, no background pre-fetch, no caching.
---   2. On every mouse move, emit ONE display escape that crops the cell for the
---      chosen pose out of the sheet (source rect x,y,w,h) and scales it into the
---      pane's cell box (c,r). Re-placing the same placement id REPLACES in place,
---      so a frame is a single escape -- no transmit, no delete, no flicker.
+--      interacts, so there is no warm-up, no background pre-fetch, no caching. Both
+--      panes share that one resident image.
+--   2. On every mouse move, emit ONE display escape PER PANE that crops the cell for
+--      the chosen pose out of the sheet (source rect x,y,w,h) and scales it into the
+--      pane's cell box (c,r). Each pane owns a distinct PLACEMENT id over the same
+--      image id, so re-placing it REPLACES that pane's head in place -- one escape,
+--      no transmit, no delete, no flicker, and the two panes never clobber each other.
 --
 -- Because the sheet is transmitted once and the terminal rescales at display time,
--- every pose is ready from the first frame and a resize is just two escapes (re-crop
--- into the new box) -- never a re-transmit. That is the whole reason this file is
--- small: there is nothing to warm.
+-- every pose is ready from the first frame and a resize is just a re-crop into the
+-- new box -- never a re-transmit. That is the whole reason this file is small: there
+-- is nothing to warm.
 --
 -- KITTY-ONLY. This needs a terminal that speaks the kitty graphics protocol
--- (kitty / Ghostty / WezTerm). If none is detected the pane is left blank.
+-- (kitty / Ghostty / WezTerm). If none is detected the panes are left blank.
 
 local api = vim.api
 local M = {}
@@ -45,7 +52,7 @@ M.config = {
   -- visual units as horizontal so a "square" of cursor travel maps evenly.
   cell_aspect = 2.0,
   sheet = nil, -- resolved in setup() to <config>/portrait/atlas/sheet.png
-  image_id = 1000, -- kitty image id + placement id for the sheet (one resident image)
+  image_id = 1000, -- kitty image id for the sheet (one resident image, shared by both panes)
   -- kitty display z-index: negative => drawn BELOW text. The square pane shows a
   -- blank scratch buffer, so the head shows through; any real text would occlude it.
   zindex = -1,
@@ -58,30 +65,48 @@ M.config = {
   -- grid is discrete, so easing makes a fast swing GLIDE through the in-between poses
   -- we already have instead of jumping cells (which read as jitter).
   ease_tau = 70, -- ms
-  -- Rows the tree pane keeps when the ideal square would crush it: on a wide
-  -- column width/2 can exceed the height available, so we cap the square and let
-  -- it be wider-than-tall rather than starve the tree above it.
+  -- Idle "return to centre": if no <MouseMove> arrives for this long, the heads
+  -- ease back to facing forward (the grid centre) instead of staying frozen at the
+  -- last cursor pose. Reuses the same easer, so the swing back glides like any other.
+  idle_return = 1500, -- ms
+  -- Rows the tree pane keeps when the ideal squares would crush it: on a wide
+  -- column width/2 (per square) can exceed the height available, so we cap the
+  -- squares and let them be wider-than-tall rather than starve the tree between them.
   min_tree = 6,
 }
 
 -- engine state -------------------------------------------------------------
+--
+-- `state` holds what the two panes SHARE: the tree window between them, kitty
+-- readiness, the single transmitted sheet and its per-pose cell size, plus the list
+-- of panes. Everything that differs per head lives on the pane object (see new_pane).
 
 local state = {
-  tree = nil, -- top window (nvim-tree)
-  square = nil, -- bottom window (the head is drawn over this pane)
-  pose = nil, -- {yi, pi} cell currently shown, so we can skip no-op repaints
-  target = nil, -- {ty, tp} continuous index the head is easing toward (the cursor)
-  cur = nil, -- {cy, cp} continuous index actually displayed (eased; rounds to `pose`)
+  tree = nil, -- the file-tree window the squares sandwich
+  panes = {}, -- list of pane objects (top + bottom), each an independent head
   active = false, -- attached and running
   ready = false, -- a kitty graphics terminal was detected
   transmitted = false, -- the sheet has been sent to the terminal
   cell = nil, -- {w, h} source pixels per pose, read from the sheet's dimensions
-  sgeo = nil, -- last square geometry {row,col,width,height}, to skip no-op redraws
-  ease_timer = nil, -- uv timer driving the ease; runs only while unsettled
-  easing = false, -- whether ease_timer is currently started
+  idle_timer = nil, -- one-shot: fires config.idle_return ms after the last mouse move
 }
 
 local uv = vim.uv or vim.loop
+
+-- A pane: one square window showing one head, with its own placement id, easer and
+-- geometry cache so the two heads animate and re-crop fully independently.
+local function new_pane(square, placement_id)
+  return {
+    square = square, -- the window the head is drawn over
+    placement_id = placement_id, -- distinct kitty placement over the shared image
+    pose = nil, -- {yi, pi} cell currently shown, so we can skip no-op repaints
+    target = nil, -- {ty, tp} continuous index the head is easing toward (the cursor)
+    cur = nil, -- {cy, cp} continuous index actually displayed (eased; rounds to `pose`)
+    sgeo = nil, -- last square geometry {row,col,width,height}, to skip no-op redraws
+    ease_timer = nil, -- uv timer driving the ease; runs only while unsettled
+    easing = false, -- whether ease_timer is currently started
+  }
+end
 
 -- A throwaway, unlisted scratch buffer for a structural pane.
 local function scratch()
@@ -112,27 +137,27 @@ end
 
 -- geometry -----------------------------------------------------------------
 
-local function square_geometry()
-  local pos = api.nvim_win_get_position(state.square) -- {row, col}, 0-based, editor grid
+local function square_geometry(pane)
+  local pos = api.nvim_win_get_position(pane.square) -- {row, col}, 0-based, editor grid
   return {
     row = pos[1],
     col = pos[2],
-    width = api.nvim_win_get_width(state.square),
-    height = api.nvim_win_get_height(state.square),
+    width = api.nvim_win_get_width(pane.square),
+    height = api.nvim_win_get_height(pane.square),
   }
 end
 
 -- mouse -> pose ------------------------------------------------------------
 
--- Where is the cursor relative to the square pane's centre? Returns normalized
+-- Where is the cursor relative to THIS pane's centre? Returns normalized
 -- (nx, ny) in [-1, 1] in *visual* space (vertical corrected for cell aspect),
 -- with +x right and +y down. Computed from screen cells, so it tracks the mouse
 -- anywhere on screen, not just inside the pane.
-local function cursor_offset()
+local function cursor_offset(pane)
   local mp = vim.fn.getmousepos()
-  -- Reuse the square geometry cached by enforce_square (refreshed on every layout
+  -- Reuse the square geometry cached by enforce_column (refreshed on every layout
   -- change) rather than re-querying the windowing layer on every mouse-move event.
-  local g = state.sgeo or square_geometry()
+  local g = pane.sgeo or square_geometry(pane)
   local cx = g.col + g.width / 2
   local cy = g.row + g.height / 2
   -- getmousepos is 1-based and screen-relative; with showtabline=0 the editor
@@ -148,8 +173,8 @@ end
 -- easer can interpolate through cells rather than snap. The head looks toward the
 -- cursor: yaw follows it left/right (nx), pitch up/down (ny matches the atlas's pitch
 -- direction, so cursor-above -> head looks up). Clamped to the grid.
-local function target_for_cursor()
-  local nx, ny = cursor_offset()
+local function target_for_cursor(pane)
+  local nx, ny = cursor_offset(pane)
   local function idx(n, steps)
     n = math.max(-1, math.min(1, n))
     return (n + 1) / 2 * (steps - 1)
@@ -281,10 +306,10 @@ local function transmit_sheet()
   return true
 end
 
--- Show pose (yi,pi): crop its cell out of the sheet (source rect x,y,w,h, in sheet
--- pixels) and scale it into the pane's cell box (c=cols, r=rows). Re-placing the
--- sheet's own placement id REPLACES the previous placement in place -- one escape,
--- no transmit, no delete.
+-- Show pose (yi,pi) on `pane`: crop its cell out of the sheet (source rect x,y,w,h,
+-- in sheet pixels) and scale it into the pane's cell box (c=cols, r=rows). Re-placing
+-- THIS PANE's placement id (over the shared image id) REPLACES only this pane's head
+-- in place -- one escape, no transmit, no delete, and the other pane is untouched.
 --
 -- We build the framed display escape by hand instead of calling image.nvim's
 -- write_graphics_at because that helper parks the cursor with CSI s / CSI u
@@ -294,8 +319,8 @@ end
 -- OFF THE BOTTOM. The unambiguous DEC pair ESC 7 / ESC 8 (DECSC/DECRC) restores
 -- correctly everywhere, so the head stays pinned. Still one synchronized (DEC 2026)
 -- frame, so the swap is gapless.
-local function kitty_show(yi, pi)
-  local g = state.sgeo or square_geometry()
+local function kitty_show(pane, yi, pi)
+  local g = pane.sgeo or square_geometry(pane)
   local cw, ch = state.cell[1], state.cell[2]
   local c = kitty.codes.control
   -- screen cursor is 1-based; with showtabline=0 the editor grid starts at 1,1.
@@ -309,7 +334,7 @@ local function kitty_show(yi, pi)
   local control = table.concat({
     c.keys.action .. '=' .. c.action.display,
     c.keys.image_id .. '=' .. M.config.image_id,
-    c.keys.placement_id .. '=' .. M.config.image_id,
+    c.keys.placement_id .. '=' .. pane.placement_id, -- per-pane placement over the shared image
     c.keys.display_x .. '=' .. (yi * cw), -- source crop: left edge of this pose's cell
     c.keys.display_y .. '=' .. (pi * ch), -- source crop: top edge of this pose's cell
     c.keys.display_width .. '=' .. cw, -- source crop: one cell wide
@@ -329,26 +354,29 @@ local function kitty_show(yi, pi)
   pcall(kitty.helpers.write, seq, tty, true)
 end
 
--- Free the sheet from the terminal (d=A frees image DATA, not just placements).
--- Used on teardown / atlas rebuild -- NOT on resize, since transmits are size-free.
+-- Free the sheet from the terminal (d=A frees image DATA, not just placements, so it
+-- drops both panes' placements too). Used on teardown / atlas rebuild -- NOT on
+-- resize, since transmits are size-free.
 local function kitty_clear()
   if kitty and kitty.ok then
     pcall(kitty.helpers.write_graphics, { action = kitty.codes.control.action.delete, display_delete = 'A', quiet = 2 })
   end
   state.transmitted = false
-  state.pose = nil
+  for _, pane in ipairs(state.panes) do
+    pane.pose = nil
+  end
 end
 
--- The render seam: ensure the sheet is resident, then show the pose. Silently does
--- nothing until a kitty terminal is confirmed (state.ready).
-function M.render_pose(yi, pi)
+-- The render seam: ensure the sheet is resident, then show the pose on `pane`.
+-- Silently does nothing until a kitty terminal is confirmed (state.ready).
+function M.render_pose(pane, yi, pi)
   if not state.ready then
     return
   end
   if not state.transmitted and not transmit_sheet() then
-    return -- sheet missing / no kitty -> leave the pane blank
+    return -- sheet missing / no kitty -> leave the panes blank
   end
-  kitty_show(yi, pi)
+  kitty_show(pane, yi, pi)
 end
 
 -- easing -------------------------------------------------------------------
@@ -357,83 +385,123 @@ end
 -- mouse events and read as jitter. Instead <MouseMove> only sets a continuous TARGET
 -- (target_for_cursor); a timer walks the DISPLAYED index toward it a fraction per tick
 -- (exponential smoothing, time-constant config.ease_tau), so a big swing GLIDES through
--- the intermediate poses we already have, with natural head inertia. The timer renders
--- only when the rounded cell changes and stops once settled, so an idle head costs nothing.
+-- the intermediate poses we already have, with natural head inertia. Each pane runs its
+-- own timer, renders only when its rounded cell changes, and stops once settled, so an
+-- idle head costs nothing.
 
 -- Round a continuous index to its atlas cell, clamped to the grid.
 local function cell(x, steps)
   return math.max(0, math.min(steps - 1, math.floor(x + 0.5)))
 end
 
-local stop_ease -- fwd decl (ease_tick stops the timer once settled)
+local stop_ease -- fwd decl (ease_tick stops the pane's timer once settled)
 
-local function ease_tick()
-  if not (state.active and state.cur and state.target) then
-    stop_ease()
+local function ease_tick(pane)
+  if not (state.active and pane.cur and pane.target) then
+    stop_ease(pane)
     return
   end
   -- Framerate-independent smoothing: fraction of the remaining gap to close this tick.
   local a = 1 - math.exp(-M.config.frame_interval / M.config.ease_tau)
-  local cy = state.cur[1] + (state.target[1] - state.cur[1]) * a
-  local cp = state.cur[2] + (state.target[2] - state.cur[2]) * a
+  local cy = pane.cur[1] + (pane.target[1] - pane.cur[1]) * a
+  local cp = pane.cur[2] + (pane.target[2] - pane.cur[2]) * a
   -- Snap + settle within a fraction of a cell, so the timer can idle until the next move.
-  local settled = math.abs(state.target[1] - cy) < 0.02 and math.abs(state.target[2] - cp) < 0.02
+  local settled = math.abs(pane.target[1] - cy) < 0.02 and math.abs(pane.target[2] - cp) < 0.02
   if settled then
-    cy, cp = state.target[1], state.target[2]
+    cy, cp = pane.target[1], pane.target[2]
   end
-  state.cur = { cy, cp }
+  pane.cur = { cy, cp }
   local yi, pi = cell(cy, M.config.yaw_steps), cell(cp, M.config.pitch_steps)
-  if not state.pose or state.pose[1] ~= yi or state.pose[2] ~= pi then
-    state.pose = { yi, pi }
-    M.render_pose(yi, pi)
+  if not pane.pose or pane.pose[1] ~= yi or pane.pose[2] ~= pi then
+    pane.pose = { yi, pi }
+    M.render_pose(pane, yi, pi)
   end
   if settled then
-    stop_ease()
+    stop_ease(pane)
   end
 end
 
-local function start_ease()
-  if not state.ease_timer then
-    state.ease_timer = uv.new_timer()
+local function start_ease(pane)
+  if not pane.ease_timer then
+    pane.ease_timer = uv.new_timer()
   end
-  if not state.easing then
-    state.easing = true
-    state.ease_timer:start(0, M.config.frame_interval, vim.schedule_wrap(ease_tick))
-  end
-end
-
-stop_ease = function()
-  if state.ease_timer and state.easing then
-    state.ease_timer:stop()
-    state.easing = false
+  if not pane.easing then
+    pane.easing = true
+    pane.ease_timer:start(0, M.config.frame_interval, vim.schedule_wrap(function()
+      ease_tick(pane)
+    end))
   end
 end
 
--- Live mouse feed -- cheap. Just point the target at the cursor and let the easer run;
--- the timer bounds the render rate, so the event itself needs no throttle.
-local function on_mouse()
-  if not (state.active and state.square and api.nvim_win_is_valid(state.square)) then
+stop_ease = function(pane)
+  if pane.ease_timer and pane.easing then
+    pane.ease_timer:stop()
+    pane.easing = false
+  end
+end
+
+-- After config.idle_return ms with no mouse movement, point every head's target at the
+-- grid centre (facing forward) and let the easers glide them back -- so an abandoned
+-- cursor doesn't leave the heads frozen mid-glance. Reuses the same target/easer path
+-- as a real move, so the return swing is eased identically.
+local function face_forward()
+  if not state.active then
     return
   end
-  local ty, tp = target_for_cursor()
-  state.target = { ty, tp }
-  if not state.cur then
-    state.cur = { ty, tp } -- first ever sample: start at the target, no opening swing
+  local cy = (M.config.yaw_steps - 1) / 2
+  local cp = (M.config.pitch_steps - 1) / 2
+  for _, pane in ipairs(state.panes) do
+    if pane.square and api.nvim_win_is_valid(pane.square) then
+      pane.target = { cy, cp }
+      if not pane.cur then
+        pane.cur = { cy, cp }
+      end
+      start_ease(pane)
+    end
   end
-  start_ease()
 end
 
--- Show the current pose into the (possibly new) geometry, seeding a centred pose the
--- first time so attach/rebuild paint something before the mouse moves.
-local function redraw()
-  if not state.pose then
+-- (Re)arm the one-shot idle timer: every mouse move pushes the "return to centre" back
+-- another full idle_return window, so the heads only face forward once the cursor has
+-- genuinely stopped moving for that long.
+local function arm_idle()
+  if not state.idle_timer then
+    state.idle_timer = uv.new_timer()
+  end
+  state.idle_timer:stop()
+  state.idle_timer:start(M.config.idle_return, 0, vim.schedule_wrap(face_forward))
+end
+
+-- Live mouse feed -- cheap. For each pane, just point its target at the cursor and let
+-- its easer run; the timers bound the render rate, so the event itself needs no throttle.
+local function on_mouse()
+  if not state.active then
+    return
+  end
+  for _, pane in ipairs(state.panes) do
+    if pane.square and api.nvim_win_is_valid(pane.square) then
+      local ty, tp = target_for_cursor(pane)
+      pane.target = { ty, tp }
+      if not pane.cur then
+        pane.cur = { ty, tp } -- first ever sample: start at the target, no opening swing
+      end
+      start_ease(pane)
+    end
+  end
+  arm_idle() -- cursor moved: reset the idle clock so the heads stay tracking
+end
+
+-- Show the pane's current pose into its (possibly new) geometry, seeding a centred pose
+-- the first time so attach/rebuild paint something before the mouse moves.
+local function redraw(pane)
+  if not pane.pose then
     local yi = math.floor((M.config.yaw_steps - 1) / 2)
     local pi = math.floor((M.config.pitch_steps - 1) / 2)
-    state.pose = { yi, pi }
-    state.cur = state.cur or { yi, pi }
-    state.target = state.target or { yi, pi }
+    pane.pose = { yi, pi }
+    pane.cur = pane.cur or { yi, pi }
+    pane.target = pane.target or { yi, pi }
   end
-  M.render_pose(state.pose[1], state.pose[2])
+  M.render_pose(pane, pane.pose[1], pane.pose[2])
 end
 
 -- square sizing ------------------------------------------------------------
@@ -442,58 +510,86 @@ local function hh(win)
   return (win and api.nvim_win_is_valid(win)) and api.nvim_win_get_height(win) or 0
 end
 
--- Re-show the head into the square's CURRENT geometry, whatever size it now is,
+-- Re-show a pane's head into its square's CURRENT geometry, whatever size it now is,
 -- WITHOUT forcing any heights. This is the only thing that runs on a user drag, so
 -- manual resizes are respected rather than fought -- the head just re-crops into
 -- the box the user chose. A true no-op when the geometry hasn't actually moved
 -- (transmits are size-independent, so a resize is only a re-crop -- redraw() does
 -- exactly that), so unrelated layout events cost nothing.
-local function refresh_square()
-  if not (state.square and api.nvim_win_is_valid(state.square)) then
+local function refresh_square(pane)
+  if not (pane.square and api.nvim_win_is_valid(pane.square)) then
     return
   end
-  local g = square_geometry()
-  local sg = state.sgeo
+  local g = square_geometry(pane)
+  local sg = pane.sgeo
   if sg and sg.row == g.row and sg.col == g.col and sg.width == g.width and sg.height == g.height then
     return
   end
-  state.sgeo = g
-  redraw()
+  pane.sgeo = g
+  redraw(pane)
 end
 
--- Force the bottom window back to a true visual square (rows ~= cols / aspect) by
--- handing the tree the leftover height. This necessarily OVERRIDES whatever height
--- the square currently has, so it must NOT run on a plain WinResized (a user drag) --
--- only on events that reflow the whole layout anyway (terminal resize, window close,
--- tab switch) and on the initial attach. It only ever resizes the tree + square panes
--- (never a global `wincmd =`), so other columns keep the size the user gave them.
-local function enforce_square()
-  if not (state.square and api.nvim_win_is_valid(state.square)) then
+-- Force the portrait windows back to true visual squares (rows ~= cols / aspect) by
+-- handing the tree the leftover height. This necessarily OVERRIDES whatever heights the
+-- squares currently have, so it must NOT run on a plain WinResized (a user drag) -- only
+-- on events that reflow the whole layout anyway (terminal resize, window close, tab
+-- switch) and on the initial attach. It only ever resizes the tree + square panes (never
+-- a global `wincmd =`), so other columns keep the size the user gave them.
+--
+-- Both squares sit in the SAME column as the tree (top square / tree / bottom square),
+-- so they share a width; each square's natural height is width/aspect. We size each
+-- square to that target and let the tree (between them) absorb the remainder. Because the
+-- squares bracket the tree, setting their heights pushes the delta into the tree, which
+-- pins one head to the top of the column and the other to the bottom.
+local function enforce_column()
+  if not (state.tree and api.nvim_win_is_valid(state.tree)) then
     return
   end
-  local w = api.nvim_win_get_width(state.square)
-  local target = math.max(3, math.floor(w / M.config.cell_aspect + 0.5))
-  -- Tree (top) + square (bottom) share the column; cap the square so the tree
-  -- keeps its minimum on a wide column.
-  local col_h = hh(state.tree) + hh(state.square)
-  if col_h > 0 then
-    target = math.max(3, math.min(target, col_h - M.config.min_tree))
+  local panes = {}
+  for _, p in ipairs(state.panes) do
+    if p.square and api.nvim_win_is_valid(p.square) then
+      panes[#panes + 1] = p
+    end
+  end
+  if #panes == 0 then
+    return
   end
 
-  -- Only restructure when the square isn't already the right height. We set the
-  -- tree height directly (with equalalways off so the change stays in this
-  -- column); the square below absorbs the remainder to land on `target`.
-  if hh(state.square) ~= target and col_h > 0 then
-    local tree_h = math.max(M.config.min_tree, col_h - target)
+  -- All windows in the column share a width; derive the square target from it.
+  local w = api.nvim_win_get_width(panes[1].square)
+  local target = math.max(3, math.floor(w / M.config.cell_aspect + 0.5))
+
+  -- Total column height = tree + all squares. Cap each square so the tree keeps its
+  -- minimum once every square has been carved out of the column.
+  local col_h = hh(state.tree)
+  for _, p in ipairs(panes) do
+    col_h = col_h + hh(p.square)
+  end
+  if col_h > 0 then
+    local max_total = math.max(0, col_h - M.config.min_tree)
+    target = math.max(3, math.min(target, math.floor(max_total / #panes)))
+  end
+
+  -- Size each square to `target`; the tree between them absorbs the remainder. We set
+  -- heights directly with equalalways off (so the change stays in this column) and the
+  -- tree flexible (winfixheight off) so it -- not some other column -- takes the delta.
+  if col_h > 0 then
     local ea = vim.o.equalalways
     vim.o.equalalways = false
-    vim.wo[state.square].winfixheight = false
-    pcall(api.nvim_win_set_height, state.tree, tree_h)
-    vim.wo[state.square].winfixheight = true
+    vim.wo[state.tree].winfixheight = false
+    for _, p in ipairs(panes) do
+      if hh(p.square) ~= target then
+        vim.wo[p.square].winfixheight = false
+        pcall(api.nvim_win_set_height, p.square, target)
+        vim.wo[p.square].winfixheight = true
+      end
+    end
     vim.o.equalalways = ea
   end
 
-  refresh_square()
+  for _, p in ipairs(panes) do
+    refresh_square(p)
+  end
 end
 
 -- kitty-protocol detection --------------------------------------------------
@@ -550,7 +646,7 @@ local function probe_kitty(cb)
   end, 250)
 end
 
--- Resolve whether this terminal can show the portrait: env fast-path, else probe.
+-- Resolve whether this terminal can show the portraits: env fast-path, else probe.
 local function detect_kitty(cb)
   if not kitty_load() then
     cb(false)
@@ -570,94 +666,126 @@ local function setup_autocmds()
   -- Re-square only on events that reflow the whole layout anyway. WinResized is
   -- intentionally NOT here: it fires on every border drag, and re-squaring there
   -- would fight the user's manual resize. WinScrolled is also excluded -- it fires
-  -- on every scroll and never moves the square.
+  -- on every scroll and never moves the squares.
   api.nvim_create_autocmd({ 'VimResized', 'WinClosed', 'TabEnter' }, {
     group = group,
     callback = function()
-      vim.schedule(enforce_square)
+      vim.schedule(enforce_column)
     end,
   })
-  -- A user dragging a border (WinResized) only re-crops the head into the new box;
+  -- A user dragging a border (WinResized) only re-crops the heads into their new boxes;
   -- it never forces a height, so manual resizing is respected.
   api.nvim_create_autocmd('WinResized', {
     group = group,
     callback = function()
-      vim.schedule(refresh_square)
+      vim.schedule(function()
+        for _, pane in ipairs(state.panes) do
+          refresh_square(pane)
+        end
+      end)
     end,
   })
   -- Live mouse tracking. mousemoveevent makes the UI deliver <MouseMove>; the map
-  -- is cheap (compute pose, compare, maybe one escape) so firing on every motion is
-  -- fine. Mapped across modes since the event arrives in whatever mode is active.
+  -- is cheap (compute pose, compare, maybe one escape per pane) so firing on every
+  -- motion is fine. Mapped across modes since the event arrives in whatever mode is active.
   vim.o.mousemoveevent = true
   -- Plain (non-expr) map: the function runs and the key is consumed, so nothing is
   -- typed. (An <expr> map returning '<Nop>' literally inserted "<Nop>".)
   vim.keymap.set({ 'n', 'i', 'v', 't' }, '<MouseMove>', function()
-    on_mouse() -- cheap: just retarget the head; the easer bounds the render rate
+    on_mouse() -- cheap: just retarget the heads; the easers bound the render rate
   end, { desc = 'Portrait: follow cursor' })
 end
 
--- Attach the engine to an existing window as the square pane.
-function M.attach(square)
-  state.square = square
+-- Register a square window as a head, keeping the structural pane clean. Returns the
+-- pane object; the engine starts driving it once M.attach_column runs.
+local function add_pane(square)
   vim.wo[square].winbar = '' -- keep the portrait pane clean (no heart banner)
   vim.wo[square].winfixheight = true -- 'equalalways' must not resize the square
+  -- Distinct placement id per pane over the shared image id, so the two heads can be
+  -- displayed (and replaced) independently without clobbering each other.
+  local pane = new_pane(square, M.config.image_id + #state.panes)
+  state.panes[#state.panes + 1] = pane
+  return pane
+end
+
+-- Detect kitty once, then start driving every registered pane: size the column and
+-- paint each head's first pose. Detection/transmit are shared, so this runs once for
+-- the whole column regardless of how many heads it holds.
+local function attach_column()
   api.nvim_set_hl(0, 'Portrait', { bg = 'NONE', fg = require('baseline.banners').config.fg })
   setup_autocmds()
   vim.schedule(function()
     detect_kitty(function(ok)
       state.ready = ok
       state.active = true
-      enforce_square() -- sizes the square and shows the first pose (if ready)
+      enforce_column() -- sizes the squares and shows the first pose on each (if ready)
       if not ok then
-        vim.notify('[portrait] no kitty graphics protocol detected; pane left blank', vim.log.levels.WARN)
+        vim.notify('[portrait] no kitty graphics protocol detected; panes left blank', vim.log.levels.WARN)
       end
     end)
   end)
 end
 
--- Build the two-window tree column inside `center` (assumed empty/current): file
--- tree on top, square portrait pinned to the bottom, then attach the engine to
--- the square. With splitbelow=true the window we start in stays on top and :split
--- drops the square below it.
+-- Build the three-window tree column inside `center` (assumed empty/current): a square
+-- portrait pinned to the TOP, the file tree in the MIDDLE, a square portrait pinned to
+-- the BOTTOM, then start the engine driving both heads. We split the bottom square off
+-- `center` with belowright and the top square with aboveleft, leaving `center` as the
+-- middle window for the tree.
 function M.setup_center(center)
+  -- Bottom square: split below `center`, focus moves to the new (lower) window.
   api.nvim_set_current_win(center)
-  vim.cmd('split') -- bottom (square)
-  local square = api.nvim_get_current_win()
-  local sbuf = scratch()
-  api.nvim_win_set_buf(square, sbuf)
-  -- Tag as 'portrait' so lualine skips its winbar (disabled_filetypes in
-  -- plugins/ui.lua) -- otherwise the heart-banner winbar reads as a separator
-  -- line above the portrait.
-  vim.bo[sbuf].filetype = 'portrait'
-  blank_win(square) -- the head is drawn over this pane, so keep it visually empty
+  vim.cmd('belowright split')
+  local bottom = api.nvim_get_current_win()
 
-  -- Top window gets the file tree.
+  -- Top square: split above `center`, focus moves to the new (upper) window. `center`
+  -- stays put as the middle window, now sandwiched between the two squares.
+  api.nvim_set_current_win(center)
+  vim.cmd('aboveleft split')
+  local top = api.nvim_get_current_win()
+
+  for _, square in ipairs({ top, bottom }) do
+    local sbuf = scratch()
+    api.nvim_win_set_buf(square, sbuf)
+    -- Tag as 'portrait' so lualine skips its winbar (disabled_filetypes in
+    -- plugins/ui.lua) -- otherwise the heart-banner winbar reads as a separator
+    -- line above the portrait.
+    vim.bo[sbuf].filetype = 'portrait'
+    blank_win(square) -- the head is drawn over this pane, so keep it visually empty
+    add_pane(square)
+  end
+
+  -- Middle window (`center`) gets the file tree.
   api.nvim_set_current_win(center)
   require('nvim-tree.api').tree.open({ current_window = true })
 
   state.tree = center
   -- nvim-tree pins its window winfixwidth/winfixheight=true (a sidebar default).
-  -- Here the tree is a STRUCTURAL pane whose right edge is Claude's left border, so
-  -- those pins make dragging that border fight a fixed-size neighbour: Neovim keeps
-  -- the tree's size and shoves the delta into other separators (the drag "jumps" and
-  -- untouched borders move). Release them so the tree column resizes like any other.
-  -- (The square keeps winfixheight, set in attach(), so enforce_square owns its height.)
+  -- Here the tree is a STRUCTURAL pane, so those pins make dragging its border fight
+  -- a fixed-size neighbour: Neovim keeps the tree's size and shoves the delta into
+  -- other separators (the drag "jumps" and untouched borders move). Release them so
+  -- the tree column resizes like any other. (The squares keep winfixheight, set in
+  -- add_pane(), so enforce_column owns their heights.)
   pcall(api.nvim_set_option_value, 'winfixwidth', false, { win = center })
   pcall(api.nvim_set_option_value, 'winfixheight', false, { win = center })
-  M.attach(square)
-  api.nvim_set_current_win(square)
+  attach_column()
+  api.nvim_set_current_win(bottom)
 end
 
--- Drop the sheet from the terminal and reset geometry, so a rebuilt atlas (e.g.
--- after swapping the model) is picked up on the next show without restarting.
+-- Drop the sheet from the terminal and reset every pane's geometry, so a rebuilt atlas
+-- (e.g. after swapping the model) is picked up on the next show without restarting.
 local function reset()
-  stop_ease()
   kitty_clear()
   state.cell = nil
-  state.sgeo = nil
-  state.pose = nil -- force redraw() to reseed and re-show after a rebuild
-  state.cur = nil
-  state.target = nil
+  if state.idle_timer then
+    state.idle_timer:stop()
+  end
+  for _, pane in ipairs(state.panes) do
+    stop_ease(pane)
+    pane.sgeo = nil
+    pane.pose = nil -- force redraw() to reseed and re-show after a rebuild
+    pane.cur = nil
+    pane.target = nil
+  end
 end
 
 function M.setup()
@@ -665,7 +793,9 @@ function M.setup()
   api.nvim_create_user_command('Portrait', function(opts)
     if opts.args == 'rebuild' then
       reset()
-      redraw()
+      for _, pane in ipairs(state.panes) do
+        redraw(pane)
+      end
     else
       -- Build the panes from the current window, for ad-hoc testing.
       M.setup_center(api.nvim_get_current_win())

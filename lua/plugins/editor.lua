@@ -23,7 +23,8 @@ return {
       vim.keymap.set('n', '<leader>fg', builtin.live_grep, { desc = 'Telescope live grep' })
       vim.keymap.set('n', '<leader>fb', builtin.buffers, { desc = 'Telescope buffers' })
       vim.keymap.set('n', '<leader>fh', builtin.help_tags, { desc = 'Telescope help tags' })
-      vim.keymap.set('n', '<C-t>', '<Cmd>Telescope file_browser<CR>', { desc = 'Telescope file browser' })
+      -- <leader>fe, not <C-t>: Ctrl-T is the Chrome "new tab" shortcut (baseline.panetabs).
+      vim.keymap.set('n', '<leader>fe', '<Cmd>Telescope file_browser<CR>', { desc = 'Telescope file browser' })
     end,
   },
 

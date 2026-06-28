@@ -218,6 +218,85 @@ function M.close_buf(win, buf, role)
   pcall(vim.api.nvim_buf_delete, buf, { force = vim.bo[buf].buftype == 'terminal' })
 end
 
+-- Keyboard navigation (Chrome-style) ----------------------------------------
+--
+-- These act on the tabs of whatever pane is focused -- the same per-pane buffer
+-- lists the click router uses -- so the Chrome shortcuts (next/prev, jump-to-N,
+-- close, new) drive whichever pane you're in (file pane or terminal pane).
+
+-- The buffers shown as tabs in `win` (display order), the index of the one it
+-- currently shows, and the pane's role. nil when `win` isn't a tabbed pane.
+local function tabs_of(win)
+  local role = role_of(win)
+  if not role then
+    return nil
+  end
+  local bufs = buffers_for(role)
+  local cur = vim.api.nvim_win_get_buf(win)
+  local idx
+  for i, b in ipairs(bufs) do
+    if b == cur then
+      idx = i
+      break
+    end
+  end
+  return bufs, idx, role
+end
+
+-- Show `buf` in `win`. If it's a terminal and `win` is focused, resume insert so
+-- typing keeps working (terminal panes are normally driven from terminal mode).
+local function show(win, buf)
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+    return
+  end
+  pcall(vim.api.nvim_win_set_buf, win, buf)
+  if vim.bo[buf].buftype == 'terminal' and win == vim.api.nvim_get_current_win() then
+    vim.cmd('startinsert')
+  end
+end
+
+-- Move `delta` tabs (wrapping) within the focused pane: -1 = previous, +1 = next.
+function M.nav(delta)
+  local win = vim.api.nvim_get_current_win()
+  local bufs, idx = tabs_of(win)
+  if not bufs or #bufs == 0 or not idx then
+    return
+  end
+  show(win, bufs[((idx - 1 + delta) % #bufs) + 1])
+end
+
+-- Jump to the nth tab (1-based) of the focused pane; n == -1 means the last tab.
+function M.goto_tab(n)
+  local win = vim.api.nvim_get_current_win()
+  local bufs = tabs_of(win)
+  if not bufs then
+    return
+  end
+  show(win, bufs[n == -1 and #bufs or n])
+end
+
+-- Close the focused pane's current tab (Chrome's Ctrl-W).
+function M.close_current()
+  local win = vim.api.nvim_get_current_win()
+  M.close_buf(win, vim.api.nvim_get_current_buf(), role_of(win))
+end
+
+-- Open a new tab in the focused pane: a fresh interactive terminal in a terminal
+-- pane, otherwise a blank [No Name] file buffer (Chrome's Ctrl-T).
+function M.new_tab()
+  local win = vim.api.nvim_get_current_win()
+  local role = role_of(win)
+  if not role then
+    return
+  end
+  if role == 'terms' then
+    vim.cmd('terminal')
+    vim.cmd('startinsert')
+  else
+    vim.cmd('enew')
+  end
+end
+
 -- Row 2 floating overlay (the clickable title row) --------------------------
 
 local uv = vim.uv
@@ -432,6 +511,36 @@ function M.setup()
     local w = vim.api.nvim_get_current_win()
     M.close_buf(w, vim.api.nvim_get_current_buf(), role_of(w))
   end, { desc = 'Close current buffer/tab' })
+
+  -- Chrome-style tab shortcuts, on the focused pane's tabs. Mapped in both normal
+  -- and terminal mode ({'n','t'}) so they work whichever pane you're in -- file
+  -- panes (normal mode) and the Claude/shell terminal panes (terminal mode). The
+  -- work is deferred via vim.schedule: from a terminal-mode mapping, switching the
+  -- buffer/window inline can hit textlock, and scheduling also lets terminal mode
+  -- settle before we (maybe) startinsert into the newly shown terminal.
+  local function map(lhs, fn, desc)
+    vim.keymap.set({ 'n', 't' }, lhs, function()
+      vim.schedule(fn)
+    end, { desc = desc })
+  end
+
+  -- Next / previous tab: Ctrl-Tab / Ctrl-Shift-Tab, plus Ctrl-PageDown/PageUp
+  -- (the same Chrome bindings, and more reliably distinguishable in terminals).
+  map('<C-Tab>', function() M.nav(1) end, 'Next tab (Chrome)')
+  map('<C-S-Tab>', function() M.nav(-1) end, 'Previous tab (Chrome)')
+  map('<C-PageDown>', function() M.nav(1) end, 'Next tab (Chrome)')
+  map('<C-PageUp>', function() M.nav(-1) end, 'Previous tab (Chrome)')
+
+  -- Ctrl-1..8 jump to that tab; Ctrl-9 jumps to the last tab (Chrome behaviour).
+  for n = 1, 8 do
+    map('<C-' .. n .. '>', function() M.goto_tab(n) end, 'Go to tab ' .. n .. ' (Chrome)')
+  end
+  map('<C-9>', function() M.goto_tab(-1) end, 'Go to last tab (Chrome)')
+
+  -- Close / new tab: Ctrl-W / Ctrl-T (full parity -- in terminal panes this
+  -- shadows the shell's Ctrl-W word-erase and any TUI Ctrl-T).
+  map('<C-w>', function() M.close_current() end, 'Close tab (Chrome)')
+  map('<C-t>', function() M.new_tab() end, 'New tab (Chrome)')
 
   schedule()
 end
