@@ -82,18 +82,25 @@ local state = {
   warm = { timer = nil }, -- background cache pre-warmer
   img = nil, -- current image.nvim object (kitty backend)
   kcache = {}, -- "yi_pi_WxH" -> image.nvim object, so each pose transmits once
+  kwarm = false, -- a kitty pre-warm loop is currently running
   sgeo = nil, -- last square geometry, to skip no-op re-renders on layout events
 }
 
 -- Drop every cached kitty image (free the terminal-side pixels) -- used on resize,
 -- since the cache is size-specific, and on teardown/backend switch.
 local function clear_kcache()
+  local ok, image = pcall(require, 'image')
+  local supp = ok and image._portrait_suppress or nil
   for _, img in pairs(state.kcache) do
+    if supp then
+      supp[img.internal_id] = nil -- drop stale suppression for this image
+    end
     pcall(function()
       img:clear()
     end)
   end
   state.kcache = {}
+  state.kwarm = false -- a new size needs a fresh warm pass
 end
 
 -- A throwaway, unlisted scratch buffer for a structural pane.
@@ -348,6 +355,32 @@ local function render_image(yi, pi)
   return spawn(yi, pi, w, h, true)
 end
 
+local kitty_warm -- fwd decl: kick the pre-warmer once a pose has rendered
+
+-- Delete EVERY on-screen kitty PLACEMENT in one command (a=d, d=a -- lowercase a:
+-- drop all placements but KEEP the image data resident on the terminal, so revisits
+-- never force a base64 RE-TRANSMIT over SSH). The probe established that the stacking
+-- was caused by orphaned placements -- ones beyond the single "previous" pose that
+-- our per-pose hide lost track of -- and that this terminal honors deletes. A single
+-- global delete is the robust, cheap (one escape) way to guarantee a clean slate; we
+-- pair it with a redraw inside one synchronized-output frame (see render_kitty) so
+-- the blank intermediate state is never presented -- no flicker.
+local function kitty_delete_all()
+  local ok, helpers = pcall(require, 'image/backends/kitty/helpers')
+  local ok2, codes = pcall(require, 'image/backends/kitty/codes')
+  if not (ok and ok2) then
+    return false
+  end
+  pcall(function()
+    helpers.write_graphics({
+      action = codes.control.action.delete,
+      display_delete = 'a', -- all placements; lowercase keeps image data resident
+      quiet = 2,
+    })
+  end)
+  return true
+end
+
 -- KITTY renderer: real pixels via image.nvim (kitty graphics protocol), drawn
 -- into the square window (a normal window, which image.nvim handles more reliably
 -- than a float). image.nvim owns the redraw lifecycle and uses the magick CLI
@@ -382,19 +415,101 @@ local function render_kitty(yi, pi)
     end
     state.kcache[key] = img
   end
-  -- Hide the previously shown pose, then place the new one. Both are already
-  -- transmitted (after first visit), so the clear->render gap is a single redraw
-  -- rather than a transmit stall -- no visible flash on revisited angles.
-  if state.img and state.img ~= img then
-    pcall(function()
-      state.img:clear()
-    end)
+  -- This pose is being shown for real now: lift any warm-time display suppression
+  -- on it (it may have been transmitted-but-hidden by the pre-warmer) so its async
+  -- re-render is allowed to paint. A warmed pose was marked is_rendered by the
+  -- (suppressed) warm render even though nothing reached the screen, which would
+  -- make image.nvim skip this paint as a no-op; clear that so it actually displays.
+  -- The pixels are already transmitted, so this is just a cheap placement.
+  if image._portrait_suppress then
+    image._portrait_suppress[img.internal_id] = nil
   end
+  img.is_rendered = false
+  -- Tell the image.lua patch the exact cell box to scale into: the pane itself, so
+  -- the portrait fills it (image.nvim would otherwise aspect-fit/clamp it smaller).
+  image._portrait_box = { cols = w, rows = h }
+  -- Repaint as ONE synchronized-output frame: delete every existing placement, then
+  -- draw the current pose. Wrapping both in DEC mode 2026 means the terminal buffers
+  -- the whole sequence and presents it atomically -- the blank moment between the
+  -- delete and the redraw is never shown, so there's no flicker -- while the global
+  -- delete guarantees no stacked/orphaned placements survive. img:render() emits its
+  -- own 2026 wrapper internally, so we open sync, delete, render, and close sync
+  -- ourselves (the extra trailing 2026l is a harmless no-op that also ensures sync is
+  -- closed even if render is skipped). is_rendered was cleared above so the draw is a
+  -- real (placement-only, pixels already transmitted) repaint, not a no-op.
+  local ok2, helpers = pcall(require, 'image/backends/kitty/helpers')
+  local sync = ok2 and helpers.update_sync_start ~= nil
+  if sync then
+    pcall(helpers.update_sync_start)
+  end
+  kitty_delete_all()
   state.img = img
   pcall(function()
     img:render()
   end)
+  if sync then
+    pcall(helpers.update_sync_end)
+  end
+  kitty_warm() -- transmit the remaining poses in the background
   return true
+end
+
+-- KITTY pre-warm: transmit every pose for the current pane size up front so the
+-- FIRST visit to any angle is a flash-free placement, not a base64 transmit stall
+-- over SSH. The display is suppressed during the warm (plugins/image.lua honors
+-- _portrait_suppress), so poses transmit without flashing over the visible one.
+-- One pose per tick, yielding between ticks; clear_kcache() resets it so a resize
+-- starts a fresh pass.
+local function kitty_warm_tick()
+  if not (M.config.prewarm and M.config.backend == 'kitty' and state.active) then
+    state.kwarm = false
+    return
+  end
+  if not (state.square and api.nvim_win_is_valid(state.square)) then
+    state.kwarm = false
+    return
+  end
+  local ok, image = pcall(require, 'image')
+  if not ok then
+    state.kwarm = false
+    return
+  end
+  local win = state.square
+  local w = api.nvim_win_get_width(win)
+  local h = api.nvim_win_get_height(win)
+  for pi = 0, M.config.pitch_steps - 1 do
+    for yi = 0, M.config.yaw_steps - 1 do
+      local key = frame_key(yi, pi, w, h)
+      if not state.kcache[key] then
+        local path = atlas_path(yi, pi)
+        if vim.fn.filereadable(path) == 1 then
+          local img = image.from_file(path, { id = 'portrait_' .. key, window = win, x = 0, y = 0, width = w, height = h })
+          if img then
+            state.kcache[key] = img
+            -- Suppress this pose's DISPLAY (by id) so the render only transmits;
+            -- the id stays suppressed (across the async resize/re-render) until the
+            -- pose is actually visited, which clears it (see render_kitty).
+            image._portrait_suppress = image._portrait_suppress or {}
+            image._portrait_suppress[img.internal_id] = true
+            pcall(function()
+              img:render()
+            end)
+          end
+        end
+        vim.defer_fn(kitty_warm_tick, M.config.warm_interval) -- next pose
+        return
+      end
+    end
+  end
+  state.kwarm = false -- every pose for this size is transmitted
+end
+
+kitty_warm = function()
+  if state.kwarm or not (M.config.prewarm and M.config.backend == 'kitty') then
+    return
+  end
+  state.kwarm = true
+  vim.defer_fn(kitty_warm_tick, M.config.warm_interval)
 end
 
 -- DEBUG renderer: the pose + angles card. Also the fallback when a backend is
@@ -467,40 +582,10 @@ local function hh(win)
   return (win and api.nvim_win_is_valid(win)) and api.nvim_win_get_height(win) or 0
 end
 
--- The square sizing assumes each terminal cell is `cell_aspect` times taller than
--- wide. The 2.0 default is only an approximation; if it's off, a square PNG ends
--- up letterboxed in the pane (image.nvim preserves aspect and fits inside the
--- pixel box, which isn't actually square). When the kitty backend is active we can
--- do better: image.nvim measures the real cell size, so adopt the true ratio.
--- Returns true if the ratio changed (so enforce_square knows to re-lay-out).
-local function sync_cell_aspect()
-  if M.config.backend ~= 'kitty' then
-    return false
-  end
-  local ok, utils = pcall(require, 'image/utils')
-  if not (ok and utils.term and utils.term.get_size) then
-    return false
-  end
-  local sz = utils.term.get_size()
-  if not (sz and sz.cell_width and sz.cell_height and sz.cell_width > 0) then
-    return false
-  end
-  local ratio = sz.cell_height / sz.cell_width
-  if ratio < 0 or ratio > 1 then
-    return false -- implausible; keep the current value
-  end
-  if math.abs(ratio - M.config.cell_aspect) < 0.01 then
-    return false
-  end
-  M.config.cell_aspect = ratio
-  return true
-end
-
 local function enforce_square()
   if not (state.square and api.nvim_win_is_valid(state.square)) then
     return
   end
-  sync_cell_aspect() -- adopt the terminal's real cell ratio under the kitty backend
   local w = api.nvim_win_get_width(state.square)
   local target = math.max(3, math.floor(w / M.config.cell_aspect + 0.5))
   -- The three panes share the column; cap the square so tree/empty keep their
@@ -695,6 +780,14 @@ local function probe_kitty(cb)
     finish(false)
   end, 250)
 end
+
+-- NOTE on sizing: over SSH the kernel can't report the terminal's pixel size
+-- (TIOCGWINSZ gives 0), so image.nvim assumes 8x16-px cells and would draw the
+-- portrait bitmap at that size -- smaller than WezTerm's real cells, leaving the
+-- pane letterboxed. We can't probe the real pixel size (Neovim doesn't surface
+-- the CSI 16t reply), but we don't need to: plugins/image.lua patches the kitty
+-- backend to send the pane's CELL count (c=cols, r=rows) so the terminal scales
+-- the image into the cell box we already know -- filling the pane at any cell px.
 
 -- Resolve config.backend == 'auto' to 'kitty' or 'image'. Defaults to 'image'
 -- immediately (so something shows at once) and upgrades to 'kitty' if detected.
