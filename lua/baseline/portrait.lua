@@ -722,6 +722,9 @@ local function attach_column()
       if not ok then
         vim.notify('[portrait] no kitty graphics protocol detected; panes left blank', vim.log.levels.WARN)
       end
+      -- Signal the startup splash that the sprite sheet is resident (or that we
+      -- gave up on it), so its loading bar can advance. Fires either way.
+      pcall(api.nvim_exec_autocmds, 'User', { pattern = 'PortraitReady', modeline = false })
     end)
   end)
 end

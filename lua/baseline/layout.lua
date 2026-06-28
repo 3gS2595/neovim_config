@@ -18,6 +18,17 @@
 
 local M = {}
 
+local splash = require('baseline.splash')
+
+-- The startup milestones the splash bar tracks, in the order they're shown.
+local SPLASH_STEPS = {
+  { key = 'plugins', label = 'loading plugins' },
+  { key = 'layout', label = 'building layout' },
+  { key = 'claude', label = 'starting claude' },
+  { key = 'portrait', label = 'loading portrait sprite sheet' },
+  { key = 'fastfetch', label = 'rendering splash' },
+}
+
 -- Open an interactive terminal in the current window and, if given, "type" a
 -- command into it. We send keystrokes to the shell's channel (rather than
 -- `:terminal {cmd}`, which uses a non-interactive `shell -c` that skips your rc)
@@ -96,6 +107,9 @@ local function fit_layout_to_fastfetch(claude, bottom, bottom_job, treecol)
       end
       pcall(vim.api.nvim_win_set_height, bottom, math.max(3, math.min(vim.o.lines - 6, rows + 2)))
     end
+
+    -- Splash rendered: the last startup milestone is done.
+    splash.complete('fastfetch')
   end))
 end
 
@@ -106,6 +120,9 @@ local function build()
   -- Manual pane sizes must stick. With equalalways (the default) Neovim re-equalises
   -- every split/close, which fights deliberate resizes; we size the panes ourselves.
   vim.o.equalalways = false
+
+  -- Plugins finished loading before VimEnter fired; mark it as the first tick.
+  splash.complete('plugins')
 
   local code = vim.api.nvim_get_current_win()
   -- Top-left pane keeps the bare-`nvim` empty [No Name] buffer (a blank file) so
@@ -118,6 +135,7 @@ local function build()
   vim.cmd('vsplit')
   local claude = vim.api.nvim_get_current_win()
   open_terminal('claude --dangerously-skip-permissions')
+  splash.complete('claude')
 
   -- Left area, bottom: a terminal showing just the fastfetch splash, then the
   -- resting prompt. Split off the code window BEFORE the code|tree split so it
@@ -147,6 +165,7 @@ local function build()
   -- it has measured the splash.
   vim.api.nvim_set_current_win(code)
   vim.cmd('wincmd =')
+  splash.complete('layout')
 
   -- Size the left area to fit the fastfetch splash without wrapping, render it into
   -- the bottom terminal, shrink that pane to the splash height + prompt line, and
@@ -163,10 +182,20 @@ function M.setup()
     group = vim.api.nvim_create_augroup('StartupLayout', { clear = true }),
     callback = function()
       if vim.fn.argc() > 0 then
-        -- Opened with file(s): keep the plain side-panel tree.
+        -- Opened with file(s): keep the plain side-panel tree, no splash.
         pcall(vim.cmd, 'NvimTreeOpen')
         return
       end
+      -- Paint the splash synchronously (before the deferred build) so it covers
+      -- the window juggling, and advance its bar when the portrait sheet lands.
+      splash.show(SPLASH_STEPS)
+      vim.api.nvim_create_autocmd('User', {
+        pattern = 'PortraitReady',
+        once = true,
+        callback = function()
+          splash.complete('portrait')
+        end,
+      })
       -- Defer so the rest of startup settles before we reshape the windows.
       vim.schedule(build)
     end,
