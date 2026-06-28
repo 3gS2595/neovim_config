@@ -1,100 +1,87 @@
--- Middle column = file tree (top) / square "portrait" pane (middle) / empty (bottom).
+-- Tree column = file tree (top) / square "portrait" pane (bottom).
 --
 --   +-----------+
---   | file tree |   <- nvim-tree (top)
+--   | file tree |   <- nvim-tree (top), grows to fill the space above
+--   |           |
 --   +-----------+
---   |  PORTRAIT |   <- square pane: a 3D head that looks toward the mouse
---   |  (square) |
---   +-----------+
---   |  (empty)  |   <- spare pane (bottom)
+--   |  PORTRAIT |   <- square pane: a 3D head that looks toward the mouse,
+--   |  (square) |      pinned to the BOTTOM of the column
 --   +-----------+
 --
 -- The head tracks the mouse live: 'mousemoveevent' + a <MouseMove> map feed
 -- getmousepos() into a direction, which selects the nearest precomputed viewing
--- angle ("pose") and blits that frame into a float pinned over the square pane.
+-- angle ("pose") and shows that pose over the square pane.
 --
--- Poses are precomputed offline into an atlas of PNGs (portrait/render.lua +
--- build.sh, a CPU rasterizer over an OBJ). At runtime M.render_pose() converts
--- the chosen pose's PNG to truecolor "symbols" with chafa and streams it into a
--- terminal float, whose built-in emulator renders it -- no image protocol or
--- plugin required. (A 'debug' backend draws a pose/angle card instead, and is
--- the fallback when the atlas is missing.)
+-- DESIGN -- one sheet, crop per frame. Poses are precomputed offline into a single
+-- sprite SHEET: a yaw_steps x pitch_steps grid of head renders packed into one PNG
+-- (portrait/render.lua + build.sh, a CPU rasterizer over an OBJ, montaged into
+-- atlas/sheet.png). At runtime we:
 --
--- THIS FILE IS THE BACKEND-AGNOSTIC ENGINE: pane layout, square sizing, the
--- mouse->pose mapping, and the float overlay. The per-pose pixels come from
--- M.render_pose(win, buf, yaw_i, pitch_i); a sixel backend (image.nvim) could
--- drop in there for higher fidelity without touching the rest.
+--   1. TRANSMIT the sheet to the terminal ONCE, at attach (kitty graphics protocol,
+--      f=100 raw PNG). It's the only expensive step and it happens before the user
+--      interacts, so there is no warm-up, no background pre-fetch, no caching.
+--   2. On every mouse move, emit ONE display escape that crops the cell for the
+--      chosen pose out of the sheet (source rect x,y,w,h) and scales it into the
+--      pane's cell box (c,r). Re-placing the same placement id REPLACES in place,
+--      so a frame is a single escape -- no transmit, no delete, no flicker.
+--
+-- Because the sheet is transmitted once and the terminal rescales at display time,
+-- every pose is ready from the first frame and a resize is just two escapes (re-crop
+-- into the new box) -- never a re-transmit. That is the whole reason this file is
+-- small: there is nothing to warm.
+--
+-- KITTY-ONLY. This needs a terminal that speaks the kitty graphics protocol
+-- (kitty / Ghostty / WezTerm). If none is detected the pane is left blank.
 
 local api = vim.api
 local M = {}
 
 M.config = {
-  -- Atlas grid: how many discrete viewing angles we precompute. The grid also
+  -- Atlas grid: how many discrete viewing angles the sheet packs. The grid also
   -- throttles work -- we only repaint when the cursor crosses into a new cell.
-  yaw_steps = 15, -- horizontal angles (left..right)
-  pitch_steps = 9, -- vertical angles (up..down)
-  -- How far the head turns when the cursor is at the pane edge (degrees). Only
-  -- used to label the debug overlay for now; the renderer will consume these.
-  max_yaw = 35,
-  max_pitch = 25,
+  yaw_steps = 15, -- horizontal angles (left..right) -> sheet columns
+  pitch_steps = 9, -- vertical angles (up..down) -> sheet rows
   -- Cells are ~twice as tall as wide; scale vertical mouse delta into the same
   -- visual units as horizontal so a "square" of cursor travel maps evenly.
   cell_aspect = 2.0,
-  -- Renderer: 'image' streams chafa truecolor symbols of the pose PNG into a
-  -- terminal float (real rendered frames, any terminal); 'debug' draws a
-  -- pose/angle text card. The atlas is built offline by portrait/build.sh.
-  -- 'auto'   : probe the terminal once -- use 'kitty' if the kitty graphics
-  --            protocol is supported, else 'image'. Resolved to a concrete value
-  --            at attach time. The default.
-  -- 'kitty'  : real pixels via image.nvim into the square window -- sharp,
-  --            transparent, flicker-free. Needs a kitty-protocol terminal
-  --            (kitty / WezTerm / Ghostty). (Sixel was tried and abandoned: on
-  --            Windows Terminal it flickered the whole UI and had no alpha.)
-  -- 'image'  : chafa truecolor symbols in a terminal float -- smooth, transparent,
-  --            works in ANY terminal. The fallback.
-  -- 'debug'  : pose/angle text card (also the fallback when a backend is missing).
-  backend = 'auto',
-  chafa = { 'chafa', '--format', 'symbols' }, -- size + path appended per render
-  atlas_dir = nil, -- resolved in setup() to <config>/portrait/atlas
-  prewarm = true, -- fill the frame cache in the background so motion is smooth
-  warm_interval = 12, -- ms between background pre-warm conversions
-  zindex = 40, -- above the banner/tab overlays (30/35), below telescope/noice
-  -- Rows the tree/empty panes keep when the ideal square would crush them: on a
-  -- wide column width/2 can exceed the height available, so we cap the square and
-  -- let it be wider-than-tall rather than starve its neighbours.
+  sheet = nil, -- resolved in setup() to <config>/portrait/atlas/sheet.png
+  image_id = 1000, -- kitty image id + placement id for the sheet (one resident image)
+  -- kitty display z-index: negative => drawn BELOW text. The square pane shows a
+  -- blank scratch buffer, so the head shows through; any real text would occlude it.
+  zindex = -1,
+  -- The easer's tick rate. <MouseMove> only sets a target; this timer walks the head
+  -- toward it and renders at most once per tick, always on the latest target -- so it
+  -- also bounds the display rate (<MouseMove> fires far faster than a terminal repaints).
+  frame_interval = 16, -- ms (~60fps); raise toward 33 if the link is slow
+  -- Easing time-constant: how fast the head chases the cursor. Lower = snappier,
+  -- higher = floatier. ~70ms reads as natural head inertia without feeling laggy. The
+  -- grid is discrete, so easing makes a fast swing GLIDE through the in-between poses
+  -- we already have instead of jumping cells (which read as jitter).
+  ease_tau = 70, -- ms
+  -- Rows the tree pane keeps when the ideal square would crush it: on a wide
+  -- column width/2 can exceed the height available, so we cap the square and let
+  -- it be wider-than-tall rather than starve the tree above it.
   min_tree = 6,
-  min_empty = 3,
 }
 
 -- engine state -------------------------------------------------------------
 
 local state = {
   tree = nil, -- top window (nvim-tree)
-  square = nil, -- middle window (portrait content; float sits over it)
-  empty = nil, -- bottom window
-  float = { win = nil, buf = nil },
-  pose = nil, -- {yi, pi} currently shown, so we can skip no-op repaints
-  active = false,
-  cache = {}, -- "yi_pi_WxH" -> rendered frame string (no trailing newline)
-  size = nil, -- {w, h} the cache is keyed for; cleared when the pane resizes
-  inflight = false, -- a chafa conversion is currently running (async)
-  want = nil, -- newest pose requested while a conversion was inflight (coalesced)
-  warm = { timer = nil }, -- background cache pre-warmer
-  img = nil, -- current image.nvim object (kitty backend)
-  kcache = {}, -- "yi_pi_WxH" -> image.nvim object, so each pose transmits once
-  sgeo = nil, -- last square geometry, to skip no-op re-renders on layout events
+  square = nil, -- bottom window (the head is drawn over this pane)
+  pose = nil, -- {yi, pi} cell currently shown, so we can skip no-op repaints
+  target = nil, -- {ty, tp} continuous index the head is easing toward (the cursor)
+  cur = nil, -- {cy, cp} continuous index actually displayed (eased; rounds to `pose`)
+  active = false, -- attached and running
+  ready = false, -- a kitty graphics terminal was detected
+  transmitted = false, -- the sheet has been sent to the terminal
+  cell = nil, -- {w, h} source pixels per pose, read from the sheet's dimensions
+  sgeo = nil, -- last square geometry {row,col,width,height}, to skip no-op redraws
+  ease_timer = nil, -- uv timer driving the ease; runs only while unsettled
+  easing = false, -- whether ease_timer is currently started
 }
 
--- Drop every cached kitty image (free the terminal-side pixels) -- used on resize,
--- since the cache is size-specific, and on teardown/backend switch.
-local function clear_kcache()
-  for _, img in pairs(state.kcache) do
-    pcall(function()
-      img:clear()
-    end)
-  end
-  state.kcache = {}
-end
+local uv = vim.uv or vim.loop
 
 -- A throwaway, unlisted scratch buffer for a structural pane.
 local function scratch()
@@ -123,56 +110,11 @@ local function blank_win(win)
   end)
 end
 
--- mouse -> pose ------------------------------------------------------------
+-- geometry -----------------------------------------------------------------
 
--- Map a normalized coordinate n in [-1, 1] to an atlas index in [0, steps-1].
-local function bucket(n, steps)
-  n = math.max(-1, math.min(1, n))
-  local i = math.floor((n + 1) / 2 * (steps - 1) + 0.5)
-  return math.max(0, math.min(steps - 1, i))
-end
-
--- Where is the cursor relative to the square pane's centre? Returns normalized
--- (nx, ny) in [-1, 1] in *visual* space (vertical corrected for cell aspect),
--- with +x right and +y down. Computed from screen cells, so it tracks the mouse
--- anywhere on screen, not just inside the pane.
-local function cursor_offset()
-  local mp = vim.fn.getmousepos()
+local function square_geometry()
   local pos = api.nvim_win_get_position(state.square) -- {row, col}, 0-based, editor grid
-  local w = api.nvim_win_get_width(state.square)
-  local h = api.nvim_win_get_height(state.square)
-  local cx = pos[2] + w / 2
-  local cy = pos[1] + h / 2
-  -- getmousepos is 1-based and screen-relative; with showtabline=0 the editor
-  -- grid starts at screen row/col 1, so subtract 1 to match win position.
-  local dx = (mp.screencol - 1) - cx
-  local dy = ((mp.screenrow - 1) - cy) * M.config.cell_aspect
-  local nx = dx / math.max(1, w / 2)
-  local ny = dy / math.max(1, h) -- half-visual-height = h cells (h*aspect/2)
-  return nx, ny
-end
-
--- Pick the atlas pose for the current cursor position. The head looks toward the
--- cursor: yaw follows it left/right (nx), pitch follows it up/down (ny matches the
--- atlas's pitch direction, so cursor-above -> head looks up).
-local function pose_for_cursor()
-  local nx, ny = cursor_offset()
-  local yi = bucket(nx, M.config.yaw_steps)
-  local pi = bucket(ny, M.config.pitch_steps)
-  return yi, pi
-end
-
--- Convert an atlas index back to a signed angle, for the debug label.
-local function angle(i, steps, max)
-  return (i / (steps - 1) * 2 - 1) * max
-end
-
--- overlay float ------------------------------------------------------------
-
-local function float_geometry()
-  local pos = api.nvim_win_get_position(state.square)
   return {
-    relative = 'editor',
     row = pos[1],
     col = pos[2],
     width = api.nvim_win_get_width(state.square),
@@ -180,465 +122,378 @@ local function float_geometry()
   }
 end
 
-local function ensure_float()
-  local h = state.float
-  if h.win and api.nvim_win_is_valid(h.win) then
-    -- Already up; repositioning is done in enforce_square on layout changes, NOT
-    -- here, so the per-mouse-move path stays free of window reconfigs.
-    return h
+-- mouse -> pose ------------------------------------------------------------
+
+-- Where is the cursor relative to the square pane's centre? Returns normalized
+-- (nx, ny) in [-1, 1] in *visual* space (vertical corrected for cell aspect),
+-- with +x right and +y down. Computed from screen cells, so it tracks the mouse
+-- anywhere on screen, not just inside the pane.
+local function cursor_offset()
+  local mp = vim.fn.getmousepos()
+  -- Reuse the square geometry cached by enforce_square (refreshed on every layout
+  -- change) rather than re-querying the windowing layer on every mouse-move event.
+  local g = state.sgeo or square_geometry()
+  local cx = g.col + g.width / 2
+  local cy = g.row + g.height / 2
+  -- getmousepos is 1-based and screen-relative; with showtabline=0 the editor
+  -- grid starts at screen row/col 1, so subtract 1 to match win position.
+  local dx = (mp.screencol - 1) - cx
+  local dy = ((mp.screenrow - 1) - cy) * M.config.cell_aspect
+  local nx = dx / math.max(1, g.width / 2)
+  local ny = dy / math.max(1, g.height) -- half-visual-height = h cells (h*aspect/2)
+  return nx, ny
+end
+
+-- The CONTINUOUS atlas index toward the cursor (the un-rounded grid position), so the
+-- easer can interpolate through cells rather than snap. The head looks toward the
+-- cursor: yaw follows it left/right (nx), pitch up/down (ny matches the atlas's pitch
+-- direction, so cursor-above -> head looks up). Clamped to the grid.
+local function target_for_cursor()
+  local nx, ny = cursor_offset()
+  local function idx(n, steps)
+    n = math.max(-1, math.min(1, n))
+    return (n + 1) / 2 * (steps - 1)
   end
-  h.buf = scratch()
-  local g = float_geometry()
-  local ok, win = pcall(api.nvim_open_win, h.buf, false, vim.tbl_extend('force', g, {
-    focusable = false,
-    style = 'minimal',
-    zindex = M.config.zindex,
-    noautocmd = true,
-  }))
-  if not ok then
+  return idx(nx, M.config.yaw_steps), idx(ny, M.config.pitch_steps)
+end
+
+-- kitty graphics -----------------------------------------------------------
+--
+-- We speak the kitty graphics protocol directly, reusing image.nvim's escape
+-- helpers (and its SSH tty patch) for the chunked transmit and the display escape.
+-- The sheet is transmitted ONCE (f=100, the raw PNG -- no magick) and the terminal
+-- crops + scales a cell out of it at DISPLAY time, so transmits are size-independent
+-- and the interactive path is display-only: it can never block on a transmit.
+
+local kitty = nil -- { ok, helpers, codes, tty, ssh } -- loaded once, lazily
+
+local function kitty_load()
+  if kitty then
+    return kitty.ok
+  end
+  kitty = { ok = false }
+  pcall(require, 'image') -- trigger image.nvim's lazy-load so its SSH get_tty patch installs
+  local ok1, helpers = pcall(require, 'image/backends/kitty/helpers')
+  local ok2, codes = pcall(require, 'image/backends/kitty/codes')
+  if not (ok1 and ok2) then
+    return false
+  end
+  local oku, utils = pcall(require, 'image/utils')
+  kitty.helpers = helpers
+  kitty.codes = codes
+  kitty.utils = oku and utils or nil -- kept for the tmux pane offset in kitty_show
+  kitty.tty = (oku and utils.term and utils.term.get_tty) and utils.term.get_tty() or nil
+  kitty.ssh = (vim.env.SSH_CLIENT ~= nil) or (vim.env.SSH_TTY ~= nil)
+  kitty.ok = true
+  return true
+end
+
+-- Read a PNG's pixel dimensions straight from its IHDR (bytes 17-24, big-endian),
+-- so we can derive the per-pose cell size from the sheet without spawning magick.
+local function png_size(path)
+  local fd = io.open(path, 'rb')
+  if not fd then
     return nil
   end
-  h.win = win
-  vim.wo[win].winhighlight = 'Normal:Portrait,NormalNC:Portrait'
-  return h
-end
-
-local function atlas_path(yi, pi)
-  return string.format('%s/pose_%d_%d.png', M.config.atlas_dir, yi, pi)
-end
-
--- Lazily turn the float buffer into a terminal we can stream frames into.
--- Neovim's built-in terminal emulator renders chafa's truecolor symbol output
--- natively, so no image protocol or plugin is needed.
-local function ensure_term()
-  local h = state.float
-  if h.chan and h.term_buf == h.buf then
-    return h.chan
+  local hdr = fd:read(24)
+  fd:close()
+  if not hdr or #hdr < 24 then
+    return nil
   end
-  h.chan = api.nvim_open_term(h.buf, {})
-  h.term_buf = h.buf
-  -- Keep this internal terminal out of the terminal-pane tab list.
-  pcall(function()
-    require('baseline.panetabs').exclude_buf(h.buf)
-  end)
-  return h.chan
+  local function be(s)
+    local n = 0
+    for i = 1, #s do
+      n = n * 256 + s:byte(i)
+    end
+    return n
+  end
+  return be(hdr:sub(17, 20)), be(hdr:sub(21, 24))
 end
 
--- IMAGE renderer ------------------------------------------------------------
+local KITTY_CHUNK = 4096 -- raw base64 bytes per transmit chunk (matches image.nvim)
+
+-- Transmit the sheet to the terminal exactly once and record the per-pose cell size.
+-- Size-independent (the terminal scales at display time), so this never repeats on
+-- resize. Over SSH we send the file bytes (direct); locally we hand over the path.
 --
--- Converting a PNG to symbols is the only expensive step, so we (1) run chafa
--- ASYNCHRONOUSLY (vim.system) so it never blocks the UI, (2) CACHE each frame by
--- pose+size so a revisited angle is an instant terminal write, and (3) COALESCE:
--- while one conversion is inflight, newer mouse poses just overwrite `want`, so
--- a fast sweep spawns one chafa at a time and always lands on the latest pose. A
--- background pre-warmer fills the cache for the current size while idle, after
--- which every angle is cache-hit and motion is uniformly smooth.
-
-local function frame_key(yi, pi, w, h)
-  return yi .. '_' .. pi .. '_' .. w .. 'x' .. h
-end
-
-local function float_size()
-  return api.nvim_win_get_width(state.float.win), api.nvim_win_get_height(state.float.win)
-end
-
--- Write a cached frame to the terminal in place (clear + home, no scroll).
-local function send_frame(s)
-  local chan = ensure_term()
-  pcall(api.nvim_chan_send, chan, '\27[2J\27[H' .. s)
-end
-
-local schedule_warm -- fwd decl (spawn -> schedule_warm -> spawn)
-
--- Spawn chafa for one pose, cache the result, and (when display) show it if it's
--- still the current pose at the same size. On completion, render any coalesced
--- `want`, else resume warming.
-local function spawn(yi, pi, w, h, display)
-  local path = atlas_path(yi, pi)
+-- We build the chunked transmit by hand instead of calling image.nvim's
+-- write_graphics because that helper does uv.sleep(1) BETWEEN every 4 KB chunk,
+-- which for a multi-megabyte sheet would freeze the UI for ~a second. The kitty
+-- protocol forbids interleaving other graphics commands mid-transmit, so the chunks
+-- stay consecutive -- we just drop the artificial per-chunk sleeps.
+local function transmit_sheet()
+  if state.transmitted then
+    return true
+  end
+  if not kitty_load() then
+    return false
+  end
+  local path = M.config.sheet
   if vim.fn.filereadable(path) == 0 then
     return false
   end
-  state.inflight = true
-  local cmd = vim.list_extend(vim.deepcopy(M.config.chafa), { '--size', w .. 'x' .. h, path })
-  vim.system(cmd, { text = true }, function(res)
-    vim.schedule(function()
-      state.inflight = false
-      if res.code == 0 and res.stdout and res.stdout ~= '' then
-        -- Strip the trailing newline (else the terminal scrolls a row per frame).
-        local s = res.stdout:gsub('[\r\n]+$', '')
-        state.cache[frame_key(yi, pi, w, h)] = s
-        if
-          display
-          and state.pose
-          and state.pose[1] == yi
-          and state.pose[2] == pi
-          and state.float.win
-          and api.nvim_win_is_valid(state.float.win)
-        then
-          local cw, ch = float_size()
-          if cw == w and ch == h then
-            send_frame(s)
-          end
-        end
-      end
-      local want = state.want
-      state.want = nil
-      if want then
-        M.render_pose(want[1], want[2]) -- render the latest requested pose
-      else
-        schedule_warm()
-      end
-    end)
-  end)
-  return true
-end
+  local sw, sh = png_size(path)
+  if not sw or not sh then
+    return false
+  end
+  state.cell = { math.floor(sw / M.config.yaw_steps), math.floor(sh / M.config.pitch_steps) }
 
-local function next_uncached(w, h)
-  for pi = 0, M.config.pitch_steps - 1 do
-    for yi = 0, M.config.yaw_steps - 1 do
-      if not state.cache[frame_key(yi, pi, w, h)] then
-        return yi, pi
-      end
-    end
-  end
-end
-
--- Fill the cache for the current size in the background, one pose at a time,
--- yielding to any interactive render (inflight/want take priority).
-schedule_warm = function()
-  if not (M.config.prewarm and state.active and state.float.win) then
-    return
-  end
-  if state.inflight or state.want or not api.nvim_win_is_valid(state.float.win) then
-    return
-  end
-  local w, h = float_size()
-  local yi, pi = next_uncached(w, h)
-  if not yi then
-    return -- fully warmed for this size
-  end
-  vim.defer_fn(function()
-    if not state.inflight and not state.want then
-      spawn(yi, pi, w, h, false)
-    end
-  end, M.config.warm_interval)
-end
-
--- Returns false only when the atlas/chafa is unavailable (so render_pose can
--- fall back to the debug card). A cache hit displays instantly; a miss spawns
--- one async conversion (or, if busy, records the pose to render next).
-local function render_image(yi, pi)
-  if not (state.float.win and api.nvim_win_is_valid(state.float.win)) then
-    return false
-  end
-  local w, h = float_size()
-  local cached = state.cache[frame_key(yi, pi, w, h)]
-  if cached then
-    send_frame(cached)
-    schedule_warm()
-    return true
-  end
-  if vim.fn.filereadable(atlas_path(yi, pi)) == 0 then
-    return false
-  end
-  if state.inflight then
-    state.want = { yi, pi }
-    return true
-  end
-  return spawn(yi, pi, w, h, true)
-end
-
--- KITTY renderer: real pixels via image.nvim (kitty graphics protocol), drawn
--- into the square window (a normal window, which image.nvim handles more reliably
--- than a float). image.nvim owns the redraw lifecycle and uses the magick CLI
--- processor, so no luarock is needed. Returns false if image.nvim or the atlas is
--- missing (falls back to the debug card).
-local function render_kitty(yi, pi)
-  if not (state.square and api.nvim_win_is_valid(state.square)) then
-    return false
-  end
-  local ok, image = pcall(require, 'image')
-  if not ok then
-    return false
-  end
-  local path = atlas_path(yi, pi)
-  if vim.fn.filereadable(path) == 0 then
-    return false
-  end
-  local win = state.square
-  local w = api.nvim_win_get_width(win)
-  local h = api.nvim_win_get_height(win)
-  -- One image object per pose+size, kept alive in kcache. The first visit to a
-  -- pose transmits its pixels; every later visit is a placement-only :render()
-  -- (image.nvim skips the transmit once the id+size is already on the terminal),
-  -- so swapping angles costs two escape codes, not a base64 re-upload over SSH.
-  -- A unique id per pose is what lets them all stay transmitted at once.
-  local key = frame_key(yi, pi, w, h)
-  local img = state.kcache[key]
-  if not img then
-    img = image.from_file(path, { id = 'portrait_' .. key, window = win, x = 0, y = 0, width = w, height = h })
-    if not img then
+  local c = kitty.codes.control
+  -- Over SSH the terminal can't read our filesystem, so we ship the PNG bytes
+  -- (direct); locally we hand it the path and let it read the file itself.
+  local medium = kitty.ssh and c.transmit_medium.direct or c.transmit_medium.file
+  local payload
+  if kitty.ssh then
+    local fd = io.open(path, 'rb')
+    if not fd then
       return false
     end
-    state.kcache[key] = img
+    payload = fd:read('*all')
+    fd:close()
+  else
+    payload = path -- file medium: the terminal opens this path
   end
-  -- Hide the previously shown pose, then place the new one. Both are already
-  -- transmitted (after first visit), so the clear->render gap is a single redraw
-  -- rather than a transmit stall -- no visible flash on revisited angles.
-  if state.img and state.img ~= img then
-    pcall(function()
-      state.img:clear()
-    end)
+  -- kitty wants URL-safe base64 (image.nvim maps '-' -> '/' for the same reason).
+  payload = vim.base64.encode(payload):gsub('%-', '/')
+  local tty = kitty.ssh and kitty.tty or nil
+  local first = true
+  for i = 1, #payload, KITTY_CHUNK do
+    local piece = payload:sub(i, i + KITTY_CHUNK - 1):gsub('%s', '')
+    local more = (i + KITTY_CHUNK <= #payload) and 1 or 0
+    local control
+    if first then
+      -- f=100 raw PNG (no magick, ~1/7th the bytes of RGBA); q=2 silences the ack.
+      control = string.format(
+        'a=%s,i=%d,f=%d,t=%s,q=2,m=%d',
+        c.action.transmit,
+        M.config.image_id,
+        c.transmit_format.png,
+        medium,
+        more
+      )
+      first = false
+    else
+      control = 'm=' .. more -- continuation chunks carry only the more-data flag
+    end
+    pcall(kitty.helpers.write, '\27_G' .. control .. ';' .. piece .. '\27\\', tty, true)
   end
-  state.img = img
-  pcall(function()
-    img:render()
-  end)
+  state.transmitted = true
   return true
 end
 
--- DEBUG renderer: the pose + angles card. Also the fallback when a backend is
--- missing; it owns its own float surface.
-local function render_debug(yi, pi)
-  local h = ensure_float()
-  if not h then
-    return
+-- Show pose (yi,pi): crop its cell out of the sheet (source rect x,y,w,h, in sheet
+-- pixels) and scale it into the pane's cell box (c=cols, r=rows). Re-placing the
+-- sheet's own placement id REPLACES the previous placement in place -- one escape,
+-- no transmit, no delete.
+--
+-- We build the framed display escape by hand instead of calling image.nvim's
+-- write_graphics_at because that helper parks the cursor with CSI s / CSI u
+-- (\x1b[s, \x1b[u). Those SCO save/restore sequences don't round-trip on some
+-- terminals (notably WezTerm on Windows): the cursor is left sitting over the pane,
+-- so the kitty placement re-anchors a row lower on every move and the head WALKS
+-- OFF THE BOTTOM. The unambiguous DEC pair ESC 7 / ESC 8 (DECSC/DECRC) restores
+-- correctly everywhere, so the head stays pinned. Still one synchronized (DEC 2026)
+-- frame, so the swap is gapless.
+local function kitty_show(yi, pi)
+  local g = state.sgeo or square_geometry()
+  local cw, ch = state.cell[1], state.cell[2]
+  local c = kitty.codes.control
+  -- screen cursor is 1-based; with showtabline=0 the editor grid starts at 1,1.
+  local x, y = g.col + 1, g.row + 1
+  -- Inside tmux the graphics cursor is pane-relative; shift to absolute screen
+  -- cells exactly as write_graphics_at did.
+  if kitty.utils and kitty.utils.tmux and kitty.utils.tmux.is_tmux then
+    local p = kitty.utils.tmux.get_pane_position()
+    x, y = x + p.left, y + p.top
   end
-  local w = api.nvim_win_get_width(h.win)
-  local rows = api.nvim_win_get_height(h.win)
-  local lines = {
-    'portrait :: ' .. M.config.backend,
-    '',
-    string.format('pose  %d,%d', yi, pi),
-    string.format('yaw   %+.0f°', angle(yi, M.config.yaw_steps, M.config.max_yaw)),
-    string.format('pitch %+.0f°', angle(pi, M.config.pitch_steps, M.config.max_pitch)),
-    '',
-    'move the mouse →',
-  }
-  local out = {}
-  local top = math.max(0, math.floor((rows - #lines) / 2))
-  for _ = 1, top do
-    out[#out + 1] = ''
-  end
-  for _, l in ipairs(lines) do
-    local pad = math.max(0, math.floor((w - vim.fn.strdisplaywidth(l)) / 2))
-    out[#out + 1] = string.rep(' ', pad) .. l
-  end
-  pcall(api.nvim_buf_set_lines, h.buf, 0, -1, false, out)
+  local control = table.concat({
+    c.keys.action .. '=' .. c.action.display,
+    c.keys.image_id .. '=' .. M.config.image_id,
+    c.keys.placement_id .. '=' .. M.config.image_id,
+    c.keys.display_x .. '=' .. (yi * cw), -- source crop: left edge of this pose's cell
+    c.keys.display_y .. '=' .. (pi * ch), -- source crop: top edge of this pose's cell
+    c.keys.display_width .. '=' .. cw, -- source crop: one cell wide
+    c.keys.display_height .. '=' .. ch, -- source crop: one cell tall
+    c.keys.display_columns .. '=' .. g.width, -- scale the crop into the pane's cell box
+    c.keys.display_rows .. '=' .. g.height,
+    c.keys.display_zindex .. '=' .. M.config.zindex,
+    c.keys.display_cursor_policy .. '=' .. c.display_cursor_policy.do_not_move,
+    c.keys.quiet .. '=2',
+  }, ',')
+  local ESC = '\27'
+  local seq = ESC .. '[?2026h' .. ESC .. '7' -- sync on, DEC save cursor
+    .. ESC .. '[' .. y .. ';' .. x .. 'H' -- park over the pane (absolute, 1-based)
+    .. ESC .. '_G' .. control .. ESC .. '\\' -- the display escape
+    .. ESC .. '8' .. ESC .. '[?2026l' -- DEC restore cursor, sync off
+  local tty = kitty.ssh and kitty.tty or nil
+  pcall(kitty.helpers.write, seq, tty, true)
 end
 
--- The render seam: pick a backend, falling back to the debug card.
+-- Free the sheet from the terminal (d=A frees image DATA, not just placements).
+-- Used on teardown / atlas rebuild -- NOT on resize, since transmits are size-free.
+local function kitty_clear()
+  if kitty and kitty.ok then
+    pcall(kitty.helpers.write_graphics, { action = kitty.codes.control.action.delete, display_delete = 'A', quiet = 2 })
+  end
+  state.transmitted = false
+  state.pose = nil
+end
+
+-- The render seam: ensure the sheet is resident, then show the pose. Silently does
+-- nothing until a kitty terminal is confirmed (state.ready).
 function M.render_pose(yi, pi)
-  if M.config.backend == 'kitty' and render_kitty(yi, pi) then
+  if not state.ready then
     return
   end
-  if M.config.backend == 'image' and render_image(yi, pi) then
-    return
+  if not state.transmitted and not transmit_sheet() then
+    return -- sheet missing / no kitty -> leave the pane blank
   end
-  render_debug(yi, pi)
+  kitty_show(yi, pi)
 end
 
--- Repaint only when the chosen pose actually changed (the grid throttles us).
-local function update(force)
+-- easing -------------------------------------------------------------------
+--
+-- The grid is discrete, so a fast cursor sweep would jump several cells between two
+-- mouse events and read as jitter. Instead <MouseMove> only sets a continuous TARGET
+-- (target_for_cursor); a timer walks the DISPLAYED index toward it a fraction per tick
+-- (exponential smoothing, time-constant config.ease_tau), so a big swing GLIDES through
+-- the intermediate poses we already have, with natural head inertia. The timer renders
+-- only when the rounded cell changes and stops once settled, so an idle head costs nothing.
+
+-- Round a continuous index to its atlas cell, clamped to the grid.
+local function cell(x, steps)
+  return math.max(0, math.min(steps - 1, math.floor(x + 0.5)))
+end
+
+local stop_ease -- fwd decl (ease_tick stops the timer once settled)
+
+local function ease_tick()
+  if not (state.active and state.cur and state.target) then
+    stop_ease()
+    return
+  end
+  -- Framerate-independent smoothing: fraction of the remaining gap to close this tick.
+  local a = 1 - math.exp(-M.config.frame_interval / M.config.ease_tau)
+  local cy = state.cur[1] + (state.target[1] - state.cur[1]) * a
+  local cp = state.cur[2] + (state.target[2] - state.cur[2]) * a
+  -- Snap + settle within a fraction of a cell, so the timer can idle until the next move.
+  local settled = math.abs(state.target[1] - cy) < 0.02 and math.abs(state.target[2] - cp) < 0.02
+  if settled then
+    cy, cp = state.target[1], state.target[2]
+  end
+  state.cur = { cy, cp }
+  local yi, pi = cell(cy, M.config.yaw_steps), cell(cp, M.config.pitch_steps)
+  if not state.pose or state.pose[1] ~= yi or state.pose[2] ~= pi then
+    state.pose = { yi, pi }
+    M.render_pose(yi, pi)
+  end
+  if settled then
+    stop_ease()
+  end
+end
+
+local function start_ease()
+  if not state.ease_timer then
+    state.ease_timer = uv.new_timer()
+  end
+  if not state.easing then
+    state.easing = true
+    state.ease_timer:start(0, M.config.frame_interval, vim.schedule_wrap(ease_tick))
+  end
+end
+
+stop_ease = function()
+  if state.ease_timer and state.easing then
+    state.ease_timer:stop()
+    state.easing = false
+  end
+end
+
+-- Live mouse feed -- cheap. Just point the target at the cursor and let the easer run;
+-- the timer bounds the render rate, so the event itself needs no throttle.
+local function on_mouse()
   if not (state.active and state.square and api.nvim_win_is_valid(state.square)) then
     return
   end
-  -- 'kitty' renders into the square window itself; the other backends use a float.
-  if M.config.backend ~= 'kitty' and not ensure_float() then
-    return
+  local ty, tp = target_for_cursor()
+  state.target = { ty, tp }
+  if not state.cur then
+    state.cur = { ty, tp } -- first ever sample: start at the target, no opening swing
   end
-  local yi, pi = pose_for_cursor()
-  if not force and state.pose and state.pose[1] == yi and state.pose[2] == pi then
-    return
+  start_ease()
+end
+
+-- Show the current pose into the (possibly new) geometry, seeding a centred pose the
+-- first time so attach/rebuild paint something before the mouse moves.
+local function redraw()
+  if not state.pose then
+    local yi = math.floor((M.config.yaw_steps - 1) / 2)
+    local pi = math.floor((M.config.pitch_steps - 1) / 2)
+    state.pose = { yi, pi }
+    state.cur = state.cur or { yi, pi }
+    state.target = state.target or { yi, pi }
   end
-  state.pose = { yi, pi }
-  M.render_pose(yi, pi)
+  M.render_pose(state.pose[1], state.pose[2])
 end
 
 -- square sizing ------------------------------------------------------------
 
--- Keep the middle window a true visual square (rows ~= cols / aspect) and the
--- float pinned over it. Runs on every layout change, so it must be a NO-OP when
--- nothing relevant changed -- otherwise dragging an unrelated border (e.g. the
--- bottom-left terminal) would be fought. Critically it only ever resizes the
--- THREE middle-column panes (never a global `wincmd =`), so other columns are
--- left exactly as the user sized them.
 local function hh(win)
   return (win and api.nvim_win_is_valid(win)) and api.nvim_win_get_height(win) or 0
 end
 
--- The square sizing assumes each terminal cell is `cell_aspect` times taller than
--- wide. The 2.0 default is only an approximation; if it's off, a square PNG ends
--- up letterboxed in the pane (image.nvim preserves aspect and fits inside the
--- pixel box, which isn't actually square). When the kitty backend is active we can
--- do better: image.nvim measures the real cell size, so adopt the true ratio.
--- Returns true if the ratio changed (so enforce_square knows to re-lay-out).
-local function sync_cell_aspect()
-  if M.config.backend ~= 'kitty' then
-    return false
+-- Re-show the head into the square's CURRENT geometry, whatever size it now is,
+-- WITHOUT forcing any heights. This is the only thing that runs on a user drag, so
+-- manual resizes are respected rather than fought -- the head just re-crops into
+-- the box the user chose. A true no-op when the geometry hasn't actually moved
+-- (transmits are size-independent, so a resize is only a re-crop -- redraw() does
+-- exactly that), so unrelated layout events cost nothing.
+local function refresh_square()
+  if not (state.square and api.nvim_win_is_valid(state.square)) then
+    return
   end
-  local ok, utils = pcall(require, 'image/utils')
-  if not (ok and utils.term and utils.term.get_size) then
-    return false
+  local g = square_geometry()
+  local sg = state.sgeo
+  if sg and sg.row == g.row and sg.col == g.col and sg.width == g.width and sg.height == g.height then
+    return
   end
-  local sz = utils.term.get_size()
-  if not (sz and sz.cell_width and sz.cell_height and sz.cell_width > 0) then
-    return false
-  end
-  local ratio = sz.cell_height / sz.cell_width
-  if ratio < 0 or ratio > 1 then
-    return false -- implausible; keep the current value
-  end
-  if math.abs(ratio - M.config.cell_aspect) < 0.01 then
-    return false
-  end
-  M.config.cell_aspect = ratio
-  return true
+  state.sgeo = g
+  redraw()
 end
 
+-- Force the bottom window back to a true visual square (rows ~= cols / aspect) by
+-- handing the tree the leftover height. This necessarily OVERRIDES whatever height
+-- the square currently has, so it must NOT run on a plain WinResized (a user drag) --
+-- only on events that reflow the whole layout anyway (terminal resize, window close,
+-- tab switch) and on the initial attach. It only ever resizes the tree + square panes
+-- (never a global `wincmd =`), so other columns keep the size the user gave them.
 local function enforce_square()
   if not (state.square and api.nvim_win_is_valid(state.square)) then
     return
   end
-  sync_cell_aspect() -- adopt the terminal's real cell ratio under the kitty backend
   local w = api.nvim_win_get_width(state.square)
   local target = math.max(3, math.floor(w / M.config.cell_aspect + 0.5))
-  -- The three panes share the column; cap the square so tree/empty keep their
-  -- minimums on a wide column.
-  local col_h = hh(state.tree) + hh(state.square) + hh(state.empty)
+  -- Tree (top) + square (bottom) share the column; cap the square so the tree
+  -- keeps its minimum on a wide column.
+  local col_h = hh(state.tree) + hh(state.square)
   if col_h > 0 then
-    target = math.max(3, math.min(target, col_h - M.config.min_tree - M.config.min_empty))
+    target = math.max(3, math.min(target, col_h - M.config.min_tree))
   end
 
   -- Only restructure when the square isn't already the right height. We set the
-  -- tree and empty heights directly (with equalalways off so the change stays in
-  -- this column); the square absorbs the remainder to land on `target`.
+  -- tree height directly (with equalalways off so the change stays in this
+  -- column); the square below absorbs the remainder to land on `target`.
   if hh(state.square) ~= target and col_h > 0 then
-    local remain = math.max(0, col_h - target)
-    local empty_h = math.max(M.config.min_empty, math.floor(remain / 2))
-    local tree_h = math.max(M.config.min_tree, remain - empty_h)
+    local tree_h = math.max(M.config.min_tree, col_h - target)
     local ea = vim.o.equalalways
     vim.o.equalalways = false
     vim.wo[state.square].winfixheight = false
     pcall(api.nvim_win_set_height, state.tree, tree_h)
-    pcall(api.nvim_win_set_height, state.empty, empty_h)
     vim.wo[state.square].winfixheight = true
     vim.o.equalalways = ea
   end
 
-  -- Re-pin/re-render only when the square's geometry actually moved or resized
-  -- (so unrelated layout events are a true no-op). Works for every backend: the
-  -- float is repinned when present, and update() re-renders into square/float.
-  local g = float_geometry()
-  local sg = state.sgeo
-  local changed = not sg or sg.row ~= g.row or sg.col ~= g.col or sg.width ~= g.width or sg.height ~= g.height
-  if not changed then
-    return
-  end
-  local size_changed = not state.size or state.size[1] ~= g.width or state.size[2] ~= g.height
-  state.sgeo = g
-  state.size = { g.width, g.height }
-  if size_changed then
-    state.cache = {} -- symbols frames are size-specific
-    clear_kcache() -- so is the kitty image cache
-  end
-  if state.float.win and api.nvim_win_is_valid(state.float.win) then
-    pcall(api.nvim_win_set_config, state.float.win, g)
-  end
-  update(true)
-end
-
--- wiring -------------------------------------------------------------------
-
-local function setup_autocmds()
-  local group = api.nvim_create_augroup('Portrait', { clear = true })
-  api.nvim_create_autocmd({ 'WinResized', 'VimResized', 'WinClosed', 'WinScrolled', 'TabEnter' }, {
-    group = group,
-    callback = function()
-      vim.schedule(enforce_square)
-    end,
-  })
-  -- Live mouse tracking. mousemoveevent makes the UI deliver <MouseMove>; the map
-  -- is cheap (compute pose, compare, maybe repaint) so firing on every motion is
-  -- fine. Mapped across modes since the event arrives in whatever mode is active.
-  vim.o.mousemoveevent = true
-  -- Plain (non-expr) map: the function runs and the key is consumed, so nothing
-  -- is typed. (An <expr> map returning '<Nop>' literally inserted "<Nop>".)
-  vim.keymap.set({ 'n', 'i', 'v', 't' }, '<MouseMove>', function()
-    update(false)
-  end, { desc = 'Portrait: follow cursor' })
-end
-
--- Pick the backend when config.backend == 'auto' (defined after reset_float,
--- which it needs); forward-declared so attach can call it.
-local resolve_backend
-
--- Attach the engine to an existing window as the square pane.
-function M.attach(square)
-  state.square = square
-  state.active = true
-  vim.wo[square].winbar = '' -- keep the portrait pane clean (no heart banner)
-  vim.wo[square].winfixheight = true -- 'equalalways' must not resize the square
-  api.nvim_set_hl(0, 'Portrait', { bg = 'NONE', fg = require('baseline.banners').config.fg })
-  setup_autocmds()
-  vim.schedule(function()
-    resolve_backend() -- pick kitty/image before the first paint
-    enforce_square() -- sizes the square and renders with the chosen backend
-  end)
-end
-
--- Build the three-window middle column inside `center` (assumed empty/current),
--- then attach the engine to the square. Order with splitbelow=true: the window
--- we start in stays on top, each :split drops a new window below it.
-function M.setup_center(center)
-  api.nvim_set_current_win(center)
-  vim.cmd('split') -- middle (square)
-  local square = api.nvim_get_current_win()
-  local sbuf = scratch()
-  api.nvim_win_set_buf(square, sbuf)
-  vim.cmd('split') -- bottom (empty)
-  local empty = api.nvim_get_current_win()
-  local ebuf = scratch()
-  api.nvim_win_set_buf(empty, ebuf)
-  -- Tag both as 'portrait' so lualine skips their winbar (disabled_filetypes in
-  -- plugins/ui.lua) -- otherwise the empty pane's heart-banner winbar reads as a
-  -- separator line directly beneath the portrait.
-  vim.bo[sbuf].filetype = 'portrait'
-  vim.bo[ebuf].filetype = 'portrait'
-  blank_win(square) -- the portrait sits under a float, but blank it too for safety
-  blank_win(empty) -- removes the stray line-number '1' under the portrait
-
-  -- Top window gets the file tree.
-  api.nvim_set_current_win(center)
-  require('nvim-tree.api').tree.open({ current_window = true })
-
-  state.tree, state.empty = center, empty
-  M.attach(square)
-  api.nvim_set_current_win(square)
-end
-
--- Tear down the float (and its terminal) so the next update() rebuilds it. Used
--- when switching backends, since an 'image' float is a terminal buffer that the
--- 'debug' renderer can't write text into.
-local function reset_float()
-  local h = state.float
-  if h.win and api.nvim_win_is_valid(h.win) then
-    pcall(api.nvim_win_close, h.win, true)
-  end
-  h.win, h.buf, h.chan, h.term_buf = nil, nil, nil, nil
-  if state.img then
-    pcall(function()
-      state.img:clear()
-    end)
-    state.img = nil
-  end
-  clear_kcache()
-  state.pose = nil
-  -- Drop cached frames + geometry too, so a rebuilt atlas (e.g. after swapping the
-  -- model) or a backend switch is picked up without restarting.
-  state.cache = {}
-  state.size = nil
-  state.sgeo = nil
+  refresh_square()
 end
 
 -- kitty-protocol detection --------------------------------------------------
@@ -662,8 +517,7 @@ end
 -- General path: ask the terminal. Send a kitty graphics *query* (a=q); only a
 -- kitty-capable terminal answers with an APC '...;OK...' response, which Neovim
 -- surfaces via TermResponse. Others ignore the unknown APC, so we time out. This
--- works over SSH (the real terminal is queried) and never disturbs the display
--- (the query draws nothing).
+-- works over SSH (the real terminal is queried) and never disturbs the display.
 local function probe_kitty(cb)
   local done = false
   local grp = api.nvim_create_augroup('PortraitKittyProbe', { clear = true })
@@ -696,45 +550,122 @@ local function probe_kitty(cb)
   end, 250)
 end
 
--- Resolve config.backend == 'auto' to 'kitty' or 'image'. Defaults to 'image'
--- immediately (so something shows at once) and upgrades to 'kitty' if detected.
-resolve_backend = function()
-  if M.config.backend ~= 'auto' then
+-- Resolve whether this terminal can show the portrait: env fast-path, else probe.
+local function detect_kitty(cb)
+  if not kitty_load() then
+    cb(false)
     return
   end
   if env_kitty() then
-    M.config.backend = 'kitty'
-    reset_float()
-    update(true)
+    cb(true)
     return
   end
-  M.config.backend = 'image' -- safe default while we probe
-  reset_float()
-  update(true)
-  probe_kitty(function(ok)
-    if ok and M.config.backend == 'image' then
-      M.config.backend = 'kitty'
-      reset_float()
-      update(true)
-    end
+  probe_kitty(cb)
+end
+
+-- wiring -------------------------------------------------------------------
+
+local function setup_autocmds()
+  local group = api.nvim_create_augroup('Portrait', { clear = true })
+  -- Re-square only on events that reflow the whole layout anyway. WinResized is
+  -- intentionally NOT here: it fires on every border drag, and re-squaring there
+  -- would fight the user's manual resize. WinScrolled is also excluded -- it fires
+  -- on every scroll and never moves the square.
+  api.nvim_create_autocmd({ 'VimResized', 'WinClosed', 'TabEnter' }, {
+    group = group,
+    callback = function()
+      vim.schedule(enforce_square)
+    end,
+  })
+  -- A user dragging a border (WinResized) only re-crops the head into the new box;
+  -- it never forces a height, so manual resizing is respected.
+  api.nvim_create_autocmd('WinResized', {
+    group = group,
+    callback = function()
+      vim.schedule(refresh_square)
+    end,
+  })
+  -- Live mouse tracking. mousemoveevent makes the UI deliver <MouseMove>; the map
+  -- is cheap (compute pose, compare, maybe one escape) so firing on every motion is
+  -- fine. Mapped across modes since the event arrives in whatever mode is active.
+  vim.o.mousemoveevent = true
+  -- Plain (non-expr) map: the function runs and the key is consumed, so nothing is
+  -- typed. (An <expr> map returning '<Nop>' literally inserted "<Nop>".)
+  vim.keymap.set({ 'n', 'i', 'v', 't' }, '<MouseMove>', function()
+    on_mouse() -- cheap: just retarget the head; the easer bounds the render rate
+  end, { desc = 'Portrait: follow cursor' })
+end
+
+-- Attach the engine to an existing window as the square pane.
+function M.attach(square)
+  state.square = square
+  vim.wo[square].winbar = '' -- keep the portrait pane clean (no heart banner)
+  vim.wo[square].winfixheight = true -- 'equalalways' must not resize the square
+  api.nvim_set_hl(0, 'Portrait', { bg = 'NONE', fg = require('baseline.banners').config.fg })
+  setup_autocmds()
+  vim.schedule(function()
+    detect_kitty(function(ok)
+      state.ready = ok
+      state.active = true
+      enforce_square() -- sizes the square and shows the first pose (if ready)
+      if not ok then
+        vim.notify('[portrait] no kitty graphics protocol detected; pane left blank', vim.log.levels.WARN)
+      end
+    end)
   end)
 end
 
+-- Build the two-window tree column inside `center` (assumed empty/current): file
+-- tree on top, square portrait pinned to the bottom, then attach the engine to
+-- the square. With splitbelow=true the window we start in stays on top and :split
+-- drops the square below it.
+function M.setup_center(center)
+  api.nvim_set_current_win(center)
+  vim.cmd('split') -- bottom (square)
+  local square = api.nvim_get_current_win()
+  local sbuf = scratch()
+  api.nvim_win_set_buf(square, sbuf)
+  -- Tag as 'portrait' so lualine skips its winbar (disabled_filetypes in
+  -- plugins/ui.lua) -- otherwise the heart-banner winbar reads as a separator
+  -- line above the portrait.
+  vim.bo[sbuf].filetype = 'portrait'
+  blank_win(square) -- the head is drawn over this pane, so keep it visually empty
+
+  -- Top window gets the file tree.
+  api.nvim_set_current_win(center)
+  require('nvim-tree.api').tree.open({ current_window = true })
+
+  state.tree = center
+  -- nvim-tree pins its window winfixwidth/winfixheight=true (a sidebar default).
+  -- Here the tree is a STRUCTURAL pane whose right edge is Claude's left border, so
+  -- those pins make dragging that border fight a fixed-size neighbour: Neovim keeps
+  -- the tree's size and shoves the delta into other separators (the drag "jumps" and
+  -- untouched borders move). Release them so the tree column resizes like any other.
+  -- (The square keeps winfixheight, set in attach(), so enforce_square owns its height.)
+  pcall(api.nvim_set_option_value, 'winfixwidth', false, { win = center })
+  pcall(api.nvim_set_option_value, 'winfixheight', false, { win = center })
+  M.attach(square)
+  api.nvim_set_current_win(square)
+end
+
+-- Drop the sheet from the terminal and reset geometry, so a rebuilt atlas (e.g.
+-- after swapping the model) is picked up on the next show without restarting.
+local function reset()
+  stop_ease()
+  kitty_clear()
+  state.cell = nil
+  state.sgeo = nil
+  state.pose = nil -- force redraw() to reseed and re-show after a rebuild
+  state.cur = nil
+  state.target = nil
+end
+
 function M.setup()
-  M.config.atlas_dir = M.config.atlas_dir or (vim.fn.stdpath('config') .. '/portrait/atlas')
+  M.config.sheet = M.config.sheet or (vim.fn.stdpath('config') .. '/portrait/atlas/sheet.png')
   api.nvim_create_user_command('Portrait', function(opts)
-    if opts.args == 'auto' then
-      M.config.backend = 'auto'
-      resolve_backend()
-      vim.notify('Portrait backend: auto -> ' .. M.config.backend)
-    elseif opts.args == 'kitty' or opts.args == 'debug' or opts.args == 'image' then
-      M.config.backend = opts.args
-      reset_float()
-      update(true)
-      vim.notify('Portrait backend: ' .. M.config.backend)
-    elseif opts.args == 'rebuild' then
-      reset_float()
-      update(true)
+    if opts.args == 'rebuild' then
+      reset()
+      redraw()
     else
       -- Build the panes from the current window, for ad-hoc testing.
       M.setup_center(api.nvim_get_current_win())
@@ -742,7 +673,7 @@ function M.setup()
   end, {
     nargs = '?',
     complete = function()
-      return { 'auto', 'kitty', 'image', 'debug', 'rebuild' }
+      return { 'rebuild' }
     end,
   })
 end

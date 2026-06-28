@@ -55,7 +55,10 @@ return {
       require('nvim-tree').setup({
         on_attach = on_attach,
         view = {
-          adaptive_size = true,
+          -- adaptive_size auto-resized the tree to its content on every refresh,
+          -- which (with preserve_window_proportions off) fought manual pane
+          -- resizing. Keep the width the user gives it and don't disturb siblings.
+          preserve_window_proportions = true,
         },
       })
 

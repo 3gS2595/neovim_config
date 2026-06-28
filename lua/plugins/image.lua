@@ -21,6 +21,12 @@ return {
     -- Don't auto-clear our portrait when another window overlaps it.
     window_overlap_clear_enabled = false,
     editor_only_render_when_focused = false,
+    -- image.nvim defaults max_height_window_percentage to 50, i.e. it shrinks any
+    -- image to HALF the window height (anchored at top) -- which left the portrait
+    -- filling only the top of its pane. We size the image explicitly to the pane in
+    -- portrait.lua, so disable both clamps (100%) and let our geometry stand.
+    max_width_window_percentage = 100,
+    max_height_window_percentage = 100,
   },
   config = function(_, opts)
     -- SSH fix: over SSH image.nvim uses *direct* kitty transmission, which needs
@@ -51,6 +57,54 @@ return {
       end
       return t
     end
+
+    -- SIZING fix (letterbox): over SSH the kernel reports 0 terminal pixels, so
+    -- image.nvim assumes 8x16-px cells and draws the bitmap at that size -- smaller
+    -- than WezTerm's real cells, so the square pane shows a small, margined image.
+    -- We can't learn the real cell pixels (Neovim doesn't surface the CSI 16t
+    -- reply), and we don't need to: the kitty protocol can SCALE an image into a
+    -- given number of CELLS (c=columns, r=rows), which we already know -- it's the
+    -- pane size. image.nvim's display path only sends pixel sizes (w/h), never c/r,
+    -- so we inject them here. display_width/height are pixels == cells * cell_size,
+    -- so dividing by the same cell_size recovers the exact pane cell count; the
+    -- terminal then scales the bitmap to fill those cells at its true pixel size.
+    -- Pre-cache support: portrait.lua warms the cache by rendering every pose once
+    -- so its pixels TRANSMIT to the terminal (transmit goes through a different
+    -- helper, write_graphics, not write_graphics_at). For each pose being warmed it
+    -- puts that image's internal id in this set so the DISPLAY write below is
+    -- skipped -- the pose transmits but isn't shown, so warming never flashes poses
+    -- over the visible portrait. A SET (not a boolean) is required because the
+    -- resize is async: the display happens in a later re-render, by which time a
+    -- global flag would have been reset; the id stays set until the pose is really
+    -- visited (portrait.lua clears it then).
+    local image_mod = require('image')
+    image_mod._portrait_suppress = image_mod._portrait_suppress or {}
+    local helpers = require('image/backends/kitty/helpers')
+    local orig_write_at = helpers.write_graphics_at
+    helpers.write_graphics_at = function(config, x, y)
+      if image_mod._portrait_suppress[config.image_id] then
+        return
+      end
+      -- Scale the image to the PANE's own cell box, set by portrait.lua right
+      -- before each render. We use this rather than image.nvim's display_width/
+      -- height because image.nvim shrinks the geometry first (aspect-fit + a
+      -- max_height_window_percentage clamp), which left the portrait filling only
+      -- part of its pane. c=cols/r=rows tells the terminal to scale the whole image
+      -- into exactly that many cells -- so it fills the pane the way the chafa
+      -- backend does. We drop the pixel source-rect (w/h/x/y) so kitty uses the
+      -- full image (leaving w/h makes kitty crop to a sub-rectangle instead).
+      local box = image_mod._portrait_box
+      if box then
+        config.display_columns = box.cols
+        config.display_rows = box.rows
+        config.display_width = nil
+        config.display_height = nil
+        config.display_x = nil
+        config.display_y = nil
+      end
+      return orig_write_at(config, x, y)
+    end
+
     require('image').setup(opts)
   end,
 }
