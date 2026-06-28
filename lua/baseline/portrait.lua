@@ -1,12 +1,11 @@
--- Middle column = file tree (top) / square "portrait" pane (middle) / empty (bottom).
+-- Tree column = file tree (top) / square "portrait" pane (bottom).
 --
 --   +-----------+
---   | file tree |   <- nvim-tree (top)
+--   | file tree |   <- nvim-tree (top), grows to fill the space above
+--   |           |
 --   +-----------+
---   |  PORTRAIT |   <- square pane: a 3D head that looks toward the mouse
---   |  (square) |
---   +-----------+
---   |  (empty)  |   <- spare pane (bottom)
+--   |  PORTRAIT |   <- square pane: a 3D head that looks toward the mouse,
+--   |  (square) |      pinned to the BOTTOM of the column
 --   +-----------+
 --
 -- The head tracks the mouse live: 'mousemoveevent' + a <MouseMove> map feed
@@ -59,19 +58,17 @@ M.config = {
   -- grid is discrete, so easing makes a fast swing GLIDE through the in-between poses
   -- we already have instead of jumping cells (which read as jitter).
   ease_tau = 70, -- ms
-  -- Rows the tree/empty panes keep when the ideal square would crush them: on a
-  -- wide column width/2 can exceed the height available, so we cap the square and
-  -- let it be wider-than-tall rather than starve its neighbours.
+  -- Rows the tree pane keeps when the ideal square would crush it: on a wide
+  -- column width/2 can exceed the height available, so we cap the square and let
+  -- it be wider-than-tall rather than starve the tree above it.
   min_tree = 6,
-  min_empty = 3,
 }
 
 -- engine state -------------------------------------------------------------
 
 local state = {
   tree = nil, -- top window (nvim-tree)
-  square = nil, -- middle window (the head is drawn over this pane)
-  empty = nil, -- bottom window
+  square = nil, -- bottom window (the head is drawn over this pane)
   pose = nil, -- {yi, pi} cell currently shown, so we can skip no-op repaints
   target = nil, -- {ty, tp} continuous index the head is easing toward (the cursor)
   cur = nil, -- {cy, cp} continuous index actually displayed (eased; rounds to `pose`)
@@ -184,6 +181,7 @@ local function kitty_load()
   local oku, utils = pcall(require, 'image/utils')
   kitty.helpers = helpers
   kitty.codes = codes
+  kitty.utils = oku and utils or nil -- kept for the tmux pane offset in kitty_show
   kitty.tty = (oku and utils.term and utils.term.get_tty) and utils.term.get_tty() or nil
   kitty.ssh = (vim.env.SSH_CLIENT ~= nil) or (vim.env.SSH_TTY ~= nil)
   kitty.ok = true
@@ -286,27 +284,49 @@ end
 -- Show pose (yi,pi): crop its cell out of the sheet (source rect x,y,w,h, in sheet
 -- pixels) and scale it into the pane's cell box (c=cols, r=rows). Re-placing the
 -- sheet's own placement id REPLACES the previous placement in place -- one escape,
--- no transmit, no delete. write_graphics_at already wraps this in a DEC 2026
--- synchronized-output frame and saves/restores the cursor, so the swap is gapless.
+-- no transmit, no delete.
+--
+-- We build the framed display escape by hand instead of calling image.nvim's
+-- write_graphics_at because that helper parks the cursor with CSI s / CSI u
+-- (\x1b[s, \x1b[u). Those SCO save/restore sequences don't round-trip on some
+-- terminals (notably WezTerm on Windows): the cursor is left sitting over the pane,
+-- so the kitty placement re-anchors a row lower on every move and the head WALKS
+-- OFF THE BOTTOM. The unambiguous DEC pair ESC 7 / ESC 8 (DECSC/DECRC) restores
+-- correctly everywhere, so the head stays pinned. Still one synchronized (DEC 2026)
+-- frame, so the swap is gapless.
 local function kitty_show(yi, pi)
   local g = state.sgeo or square_geometry()
   local cw, ch = state.cell[1], state.cell[2]
   local c = kitty.codes.control
   -- screen cursor is 1-based; with showtabline=0 the editor grid starts at 1,1.
-  pcall(kitty.helpers.write_graphics_at, {
-    action = c.action.display,
-    image_id = M.config.image_id,
-    placement_id = M.config.image_id,
-    display_x = yi * cw, -- source crop: left edge of this pose's cell
-    display_y = pi * ch, -- source crop: top edge of this pose's cell
-    display_width = cw, -- source crop: one cell wide
-    display_height = ch, -- source crop: one cell tall
-    display_columns = g.width, -- scale the crop into the pane's cell box
-    display_rows = g.height,
-    display_zindex = M.config.zindex,
-    display_cursor_policy = c.display_cursor_policy.do_not_move,
-    quiet = 2,
-  }, g.col + 1, g.row + 1)
+  local x, y = g.col + 1, g.row + 1
+  -- Inside tmux the graphics cursor is pane-relative; shift to absolute screen
+  -- cells exactly as write_graphics_at did.
+  if kitty.utils and kitty.utils.tmux and kitty.utils.tmux.is_tmux then
+    local p = kitty.utils.tmux.get_pane_position()
+    x, y = x + p.left, y + p.top
+  end
+  local control = table.concat({
+    c.keys.action .. '=' .. c.action.display,
+    c.keys.image_id .. '=' .. M.config.image_id,
+    c.keys.placement_id .. '=' .. M.config.image_id,
+    c.keys.display_x .. '=' .. (yi * cw), -- source crop: left edge of this pose's cell
+    c.keys.display_y .. '=' .. (pi * ch), -- source crop: top edge of this pose's cell
+    c.keys.display_width .. '=' .. cw, -- source crop: one cell wide
+    c.keys.display_height .. '=' .. ch, -- source crop: one cell tall
+    c.keys.display_columns .. '=' .. g.width, -- scale the crop into the pane's cell box
+    c.keys.display_rows .. '=' .. g.height,
+    c.keys.display_zindex .. '=' .. M.config.zindex,
+    c.keys.display_cursor_policy .. '=' .. c.display_cursor_policy.do_not_move,
+    c.keys.quiet .. '=2',
+  }, ',')
+  local ESC = '\27'
+  local seq = ESC .. '[?2026h' .. ESC .. '7' -- sync on, DEC save cursor
+    .. ESC .. '[' .. y .. ';' .. x .. 'H' -- park over the pane (absolute, 1-based)
+    .. ESC .. '_G' .. control .. ESC .. '\\' -- the display escape
+    .. ESC .. '8' .. ESC .. '[?2026l' -- DEC restore cursor, sync off
+  local tty = kitty.ssh and kitty.tty or nil
+  pcall(kitty.helpers.write, seq, tty, true)
 end
 
 -- Free the sheet from the terminal (d=A frees image DATA, not just placements).
@@ -418,47 +438,20 @@ end
 
 -- square sizing ------------------------------------------------------------
 
--- Keep the middle window a true visual square (rows ~= cols / aspect) and re-show
--- the head when its geometry moves. Runs on every layout change, so it must be a
--- NO-OP when nothing relevant changed -- otherwise dragging an unrelated border
--- would be fought. It only ever resizes the THREE middle-column panes (never a
--- global `wincmd =`), so other columns are left exactly as the user sized them.
 local function hh(win)
   return (win and api.nvim_win_is_valid(win)) and api.nvim_win_get_height(win) or 0
 end
 
-local function enforce_square()
+-- Re-show the head into the square's CURRENT geometry, whatever size it now is,
+-- WITHOUT forcing any heights. This is the only thing that runs on a user drag, so
+-- manual resizes are respected rather than fought -- the head just re-crops into
+-- the box the user chose. A true no-op when the geometry hasn't actually moved
+-- (transmits are size-independent, so a resize is only a re-crop -- redraw() does
+-- exactly that), so unrelated layout events cost nothing.
+local function refresh_square()
   if not (state.square and api.nvim_win_is_valid(state.square)) then
     return
   end
-  local w = api.nvim_win_get_width(state.square)
-  local target = math.max(3, math.floor(w / M.config.cell_aspect + 0.5))
-  -- The three panes share the column; cap the square so tree/empty keep their
-  -- minimums on a wide column.
-  local col_h = hh(state.tree) + hh(state.square) + hh(state.empty)
-  if col_h > 0 then
-    target = math.max(3, math.min(target, col_h - M.config.min_tree - M.config.min_empty))
-  end
-
-  -- Only restructure when the square isn't already the right height. We set the
-  -- tree and empty heights directly (with equalalways off so the change stays in
-  -- this column); the square absorbs the remainder to land on `target`.
-  if hh(state.square) ~= target and col_h > 0 then
-    local remain = math.max(0, col_h - target)
-    local empty_h = math.max(M.config.min_empty, math.floor(remain / 2))
-    local tree_h = math.max(M.config.min_tree, remain - empty_h)
-    local ea = vim.o.equalalways
-    vim.o.equalalways = false
-    vim.wo[state.square].winfixheight = false
-    pcall(api.nvim_win_set_height, state.tree, tree_h)
-    pcall(api.nvim_win_set_height, state.empty, empty_h)
-    vim.wo[state.square].winfixheight = true
-    vim.o.equalalways = ea
-  end
-
-  -- Re-show only when the square's geometry actually moved or resized (so unrelated
-  -- layout events are a true no-op). Transmits are size-independent, so a resize is
-  -- just a re-crop into the new cell box -- redraw() below does exactly that.
   local g = square_geometry()
   local sg = state.sgeo
   if sg and sg.row == g.row and sg.col == g.col and sg.width == g.width and sg.height == g.height then
@@ -466,6 +459,41 @@ local function enforce_square()
   end
   state.sgeo = g
   redraw()
+end
+
+-- Force the bottom window back to a true visual square (rows ~= cols / aspect) by
+-- handing the tree the leftover height. This necessarily OVERRIDES whatever height
+-- the square currently has, so it must NOT run on a plain WinResized (a user drag) --
+-- only on events that reflow the whole layout anyway (terminal resize, window close,
+-- tab switch) and on the initial attach. It only ever resizes the tree + square panes
+-- (never a global `wincmd =`), so other columns keep the size the user gave them.
+local function enforce_square()
+  if not (state.square and api.nvim_win_is_valid(state.square)) then
+    return
+  end
+  local w = api.nvim_win_get_width(state.square)
+  local target = math.max(3, math.floor(w / M.config.cell_aspect + 0.5))
+  -- Tree (top) + square (bottom) share the column; cap the square so the tree
+  -- keeps its minimum on a wide column.
+  local col_h = hh(state.tree) + hh(state.square)
+  if col_h > 0 then
+    target = math.max(3, math.min(target, col_h - M.config.min_tree))
+  end
+
+  -- Only restructure when the square isn't already the right height. We set the
+  -- tree height directly (with equalalways off so the change stays in this
+  -- column); the square below absorbs the remainder to land on `target`.
+  if hh(state.square) ~= target and col_h > 0 then
+    local tree_h = math.max(M.config.min_tree, col_h - target)
+    local ea = vim.o.equalalways
+    vim.o.equalalways = false
+    vim.wo[state.square].winfixheight = false
+    pcall(api.nvim_win_set_height, state.tree, tree_h)
+    vim.wo[state.square].winfixheight = true
+    vim.o.equalalways = ea
+  end
+
+  refresh_square()
 end
 
 -- kitty-protocol detection --------------------------------------------------
@@ -539,13 +567,22 @@ end
 
 local function setup_autocmds()
   local group = api.nvim_create_augroup('Portrait', { clear = true })
-  -- NB: WinScrolled is intentionally excluded -- it fires on every scroll of any
-  -- window and only ever resolved to a no-op here (the square's geometry doesn't
-  -- change on scroll). Resize/close/tab events cover the cases that move the square.
-  api.nvim_create_autocmd({ 'WinResized', 'VimResized', 'WinClosed', 'TabEnter' }, {
+  -- Re-square only on events that reflow the whole layout anyway. WinResized is
+  -- intentionally NOT here: it fires on every border drag, and re-squaring there
+  -- would fight the user's manual resize. WinScrolled is also excluded -- it fires
+  -- on every scroll and never moves the square.
+  api.nvim_create_autocmd({ 'VimResized', 'WinClosed', 'TabEnter' }, {
     group = group,
     callback = function()
       vim.schedule(enforce_square)
+    end,
+  })
+  -- A user dragging a border (WinResized) only re-crops the head into the new box;
+  -- it never forces a height, so manual resizing is respected.
+  api.nvim_create_autocmd('WinResized', {
+    group = group,
+    callback = function()
+      vim.schedule(refresh_square)
     end,
   })
   -- Live mouse tracking. mousemoveevent makes the UI deliver <MouseMove>; the map
@@ -578,32 +615,35 @@ function M.attach(square)
   end)
 end
 
--- Build the three-window middle column inside `center` (assumed empty/current),
--- then attach the engine to the square. Order with splitbelow=true: the window
--- we start in stays on top, each :split drops a new window below it.
+-- Build the two-window tree column inside `center` (assumed empty/current): file
+-- tree on top, square portrait pinned to the bottom, then attach the engine to
+-- the square. With splitbelow=true the window we start in stays on top and :split
+-- drops the square below it.
 function M.setup_center(center)
   api.nvim_set_current_win(center)
-  vim.cmd('split') -- middle (square)
+  vim.cmd('split') -- bottom (square)
   local square = api.nvim_get_current_win()
   local sbuf = scratch()
   api.nvim_win_set_buf(square, sbuf)
-  vim.cmd('split') -- bottom (empty)
-  local empty = api.nvim_get_current_win()
-  local ebuf = scratch()
-  api.nvim_win_set_buf(empty, ebuf)
-  -- Tag both as 'portrait' so lualine skips their winbar (disabled_filetypes in
-  -- plugins/ui.lua) -- otherwise the empty pane's heart-banner winbar reads as a
-  -- separator line directly beneath the portrait.
+  -- Tag as 'portrait' so lualine skips its winbar (disabled_filetypes in
+  -- plugins/ui.lua) -- otherwise the heart-banner winbar reads as a separator
+  -- line above the portrait.
   vim.bo[sbuf].filetype = 'portrait'
-  vim.bo[ebuf].filetype = 'portrait'
   blank_win(square) -- the head is drawn over this pane, so keep it visually empty
-  blank_win(empty) -- removes the stray line-number '1' under the portrait
 
   -- Top window gets the file tree.
   api.nvim_set_current_win(center)
   require('nvim-tree.api').tree.open({ current_window = true })
 
-  state.tree, state.empty = center, empty
+  state.tree = center
+  -- nvim-tree pins its window winfixwidth/winfixheight=true (a sidebar default).
+  -- Here the tree is a STRUCTURAL pane whose right edge is Claude's left border, so
+  -- those pins make dragging that border fight a fixed-size neighbour: Neovim keeps
+  -- the tree's size and shoves the delta into other separators (the drag "jumps" and
+  -- untouched borders move). Release them so the tree column resizes like any other.
+  -- (The square keeps winfixheight, set in attach(), so enforce_square owns its height.)
+  pcall(api.nvim_set_option_value, 'winfixwidth', false, { win = center })
+  pcall(api.nvim_set_option_value, 'winfixheight', false, { win = center })
   M.attach(square)
   api.nvim_set_current_win(square)
 end

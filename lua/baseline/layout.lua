@@ -1,12 +1,14 @@
--- Default startup layout: three columns.
+-- Default startup layout: a left area (code + tree over a shared terminal) and a
+-- full-height Claude column on the right.
 --
 --   +-----------+-----------+-----------+
---   | code view |           |           |
---   |  (top)    | file tree | terminal  |
---   +-----------+ (center)  | (right)   |
---   | terminal  |           |           |
---   | (bottom)  |           |           |
---   +-----------+-----------+-----------+
+--   | code view | file tree |           |
+--   |  (top)    | +portrait |  claude   |
+--   |           | (bottom)  | (right,   |
+--   +-----------+-----------+  full     |
+--   |   terminal (spans     |  height)  |
+--   |   under code + tree)  |           |
+--   +-----------------------+-----------+
 --
 -- Built on VimEnter, but only for a bare `nvim` (no file arguments) so it does
 -- not hijack `nvim <file>`, git commit editors, pagers, etc. When files are
@@ -46,6 +48,9 @@ local function build()
   -- Predictable split directions: new splits go right / below.
   vim.o.splitright = true
   vim.o.splitbelow = true
+  -- Manual pane sizes must stick. With equalalways (the default) Neovim re-equalises
+  -- every split/close, which fights deliberate resizes; we size the panes ourselves.
+  vim.o.equalalways = false
 
   local code = vim.api.nvim_get_current_win()
   -- Top-left pane shows the project README when there is one. Every pane lists
@@ -53,29 +58,30 @@ local function build()
   -- the buffer), so no pane needs tagging here.
   open_readme()
 
-  -- Three columns: code | center | right.
+  -- Right column: a full-height terminal running Claude. It shares the terminal
+  -- tabs with the bottom terminal (every terminal pane lists all terminals).
   vim.cmd('vsplit')
-  local center = vim.api.nvim_get_current_win()
-  vim.cmd('vsplit')
-  local right = vim.api.nvim_get_current_win()
-
-  -- Right column: a terminal running Claude. It shares the terminal tabs with
-  -- the bottom-left pane (every terminal pane lists all terminals).
-  vim.api.nvim_set_current_win(right)
+  local claude = vim.api.nvim_get_current_win()
   open_terminal('claude --dangerously-skip-permissions')
 
-  -- Center column: file tree (top) / square portrait pane / empty (bottom).
-  vim.api.nvim_set_current_win(center)
-  require('baseline.portrait').setup_center(center)
-
-  -- Left column, bottom half: a terminal running `c`, below the code view.
+  -- Left area, bottom: a terminal running `c`. Split off the code window BEFORE
+  -- the code|tree split so it spans the full width below both of them.
   vim.api.nvim_set_current_win(code)
   vim.cmd('split')
   open_terminal('c')
 
-  -- Even out the columns and land the cursor in the code view.
+  -- Top row of the left area: code view (left) | file tree + portrait (right).
+  vim.api.nvim_set_current_win(code)
+  vim.cmd('vsplit')
+  local tree = vim.api.nvim_get_current_win()
+  require('baseline.portrait').setup_center(tree)
+
+  -- Width: Claude owns the right 50%, the left area (code | tree, over the wide
+  -- terminal) shares the other 50%. Equalise first so code|tree split the left half
+  -- evenly, then pin Claude to half the screen; the left area absorbs the rest.
   vim.api.nvim_set_current_win(code)
   vim.cmd('wincmd =')
+  pcall(vim.api.nvim_win_set_width, claude, math.floor(vim.o.columns / 2))
 
   -- Keep the code view following whatever file gets edited (e.g. by Claude in
   -- the right terminal) without stealing focus from the terminal.
