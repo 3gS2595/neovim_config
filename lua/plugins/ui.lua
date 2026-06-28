@@ -36,6 +36,10 @@ return {
           theme = custom_theme,
           globalstatus = true,
           icons_enabled = true,
+          -- The portrait engine's structural panes (square + empty) carry this
+          -- filetype; skip their winbar so no banner/separator line is drawn
+          -- beneath the portrait (baseline/portrait.lua).
+          disabled_filetypes = { winbar = { 'portrait' } },
           section_separators = {
             left = '',
             right = '',

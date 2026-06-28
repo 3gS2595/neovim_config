@@ -22,6 +22,10 @@ vim.opt.rtp:prepend(lazypath)
 require('lazy').setup('plugins', {
   install = { colorscheme = { 'wildcharm-redux' } },
   change_detection = { notify = false },
+  -- image.nvim uses the magick CLI (processor='magick_cli'), so it needs no
+  -- luarock. Disable lazy's luarocks/hererocks support so its build step doesn't
+  -- fail trying to install one.
+  rocks = { enabled = false },
 })
 
 vim.cmd.colorscheme('wildcharm-redux')

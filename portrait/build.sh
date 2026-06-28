@@ -28,7 +28,9 @@ for ((yi=0; yi<YAW_STEPS; yi++)); do
     pitch=$(angle "$pi" "$PITCH_STEPS" "$MAX_PITCH")
     ppm="$(mktemp --suffix=.ppm)"
     nvim -l render.lua "$OBJ" "$ppm" "$SIZE" "$yaw" "$pitch" >/dev/null 2>&1
-    magick "$ppm" "atlas/pose_${yi}_${pi}.png"
+    # Key the pure-black background out to alpha so only the model shows; the
+    # model's darkest shade is deep indigo, never pure black, so this is clean.
+    magick "$ppm" -transparent '#000000' "atlas/pose_${yi}_${pi}.png"
     rm -f "$ppm"
     count=$((count+1))
   done

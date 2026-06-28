@@ -16,9 +16,9 @@ local yaw = math.rad(tonumber(arg[4]) or 0)
 local pitch = math.rad(tonumber(arg[5]) or 0)
 
 -- Base orientation so the model faces the camera before yaw/pitch are applied.
--- Suzanne's face points toward -Z in this OBJ; spin 180° about Y to face +Z
--- (the viewer). Tweak here if a different asset faces elsewhere.
-local base_yaw = math.rad(180)
+-- Suzanne already faces +Z (the viewer) in this OBJ, so no base spin. Set this
+-- if a different asset faces elsewhere.
+local base_yaw = math.rad(0)
 
 -- parse OBJ ----------------------------------------------------------------
 
