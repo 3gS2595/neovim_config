@@ -147,6 +147,22 @@ local function fit_layout_to_fastfetch(claude, bottom, bottom_job, treecol)
   end))
 end
 
+-- Look for a `notes.md` at the base of the repo (git top-level, falling back to
+-- the cwd). Returns its absolute path if it exists, otherwise nil. Used so the
+-- code view opens on your notes instead of a blank buffer when one is present.
+local function repo_notes_path()
+  local root = vim.loop.cwd()
+  local out = vim.fn.systemlist({ 'git', '-C', root, 'rev-parse', '--show-toplevel' })
+  if vim.v.shell_error == 0 and out[1] and out[1] ~= '' then
+    root = out[1]
+  end
+  local path = root .. '/notes.md'
+  if vim.loop.fs_stat(path) then
+    return path
+  end
+  return nil
+end
+
 local function build()
   -- Predictable split directions: new splits go right / below.
   vim.o.splitright = true
@@ -193,6 +209,15 @@ local function build()
   local treecol = code -- original (left) window -> tree column
   require('baseline.portrait').setup_center(treecol)
   code = newcode -- the right window is now the code view (follow + focus track it)
+
+  -- If the repo has a notes.md at its base, open it in the code view in place of
+  -- the bare [No Name] buffer, so you land on your notes ready to edit.
+  local notes = repo_notes_path()
+  if notes then
+    vim.api.nvim_win_call(code, function()
+      vim.cmd('edit ' .. vim.fn.fnameescape(notes))
+    end)
+  end
 
   -- Equalise so the three columns start evenly; fit_layout_to_fastfetch then sets
   -- the final widths (left area = fastfetch's natural width, Claude the rest) once
