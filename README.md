@@ -1,21 +1,6 @@
-## Prerequisites
+((Doing extensive personalization, may not run on your machine))
 
-- Neovim 0.11 or later
-- `git` installed
-- Node.js and `npm` (for installing `tree-sitter-cli`)
-- Optional: Nerd Font for best icon/font support
-
-## Setup
-
-1. Install [tree-sitter-cli](https://github.com/tree-sitter/tree-sitter):
-
-    ```bash
-    npm install -g tree-sitter-cli
-    ```
-
-2. Start Neovim. [lazy.nvim](https://github.com/folke/lazy.nvim) bootstraps itself and installs all plugins on first launch. Run `:Lazy` to inspect, `:Lazy sync` to update.
-
-<img width="1949" height="1192" alt="NVIM EXAMPLE" src="https://github.com/user-attachments/assets/39333a58-2b50-4548-9e4c-7c3156ce0b98" />
+<img width="1949" height="1192" alt="NVIM EXAMPLE" src="https://github.com/user-attachments/assets/f56548c9-a94f-47d1-ac7e-f00d5ff0e49e" />
 
 ## Structure
 
