@@ -1,5 +1,4 @@
-((Doing extensive personalization, may not run on your machine))
-
+((Doing extensive personalization, may not run on your machine, portraits require Kitty Graphics Protocol))
 <img width="1949" height="1192" alt="NVIM EXAMPLE" src="https://github.com/user-attachments/assets/c5969312-6899-41ca-96b4-2f48bd4496e5" />
 
 ## Structure
