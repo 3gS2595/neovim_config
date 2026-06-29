@@ -85,7 +85,7 @@ return {
                 return require('baseline.panetabs').winbar()
               end,
               padding = 0, -- flush at col 0 so row-2 overlay lines up
-              color = { fg = require('baseline.banners').config.fg },
+              color = { fg = require('baseline.banners').config.fg, gui = 'bold' },
             },
           },
         },
@@ -97,7 +97,7 @@ return {
                 return require('baseline.panetabs').winbar()
               end,
               padding = 0, -- flush at col 0 so row-2 overlay lines up
-              color = { fg = require('baseline.banners').config.fg },
+              color = { fg = require('baseline.banners').config.fg, gui = 'bold' },
             },
           },
         },

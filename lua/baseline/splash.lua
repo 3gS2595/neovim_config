@@ -52,9 +52,13 @@ local state = {
   order = {}, -- key order, for the status line
   done = 0,
   total = 0,
+  shown = 0, -- the fraction the bar is CURRENTLY drawn at (eased toward target)
   closing = false,
   timer = nil,
+  anim = nil, -- uv timer driving the eased bar + per-frame redraw
 }
+
+local uv = vim.uv or vim.loop
 
 local function dw(s)
   return vim.fn.strdisplaywidth(s)
@@ -119,8 +123,11 @@ local function build_lines()
   add('')
 
   -- loading bar: [████████░░░░░░░░]  62%
+  -- Drawn from state.shown (the eased value the animation timer walks toward the
+  -- real done/total) rather than the raw milestone count, so the bar GLIDES and
+  -- keeps creeping during a long step instead of snapping between milestones.
   local c = M.config
-  local pct = math.max(0, math.min(1, state.total > 0 and state.done / state.total or 0))
+  local pct = math.max(0, math.min(1, state.shown))
   local nfill = math.floor(pct * c.bar_width + 0.5)
   local fill = string.rep(c.fill_char, nfill)
   local empty = string.rep(c.empty_char, c.bar_width - nfill)
@@ -170,6 +177,64 @@ local function render()
   end
 end
 
+-- Force the splash window to repaint NOW. render() only updates the buffer;
+-- without this flush the screen wouldn't actually redraw until the event loop
+-- went idle, which is exactly why the bar used to sit frozen then jump.
+local function flush()
+  if state.win and api.nvim_win_is_valid(state.win) then
+    pcall(api.nvim__redraw, { win = state.win, flush = true })
+  end
+end
+
+-- Where the bar should be heading right now. The floor is the REAL progress
+-- (done/total); on top of that we trickle most of the way to the next milestone
+-- so the bar keeps creeping while a step is still in flight -- never quite
+-- reaching the milestone until it genuinely completes.
+local function compute_target()
+  if state.total == 0 then
+    return 0
+  end
+  if state.done >= state.total then
+    return 1
+  end
+  return math.min(0.99, (state.done + 0.9) / state.total)
+end
+
+-- Drive the eased bar: every frame, walk state.shown a fraction of the way to
+-- the target and repaint. Runs on a uv timer so it animates during the async
+-- tail (claude / fastfetch / portrait) when the main loop is otherwise idle.
+local function start_anim()
+  if state.anim then
+    return
+  end
+  state.anim = uv.new_timer()
+  state.anim:start(0, 33, vim.schedule_wrap(function()
+    if state.closing or not (state.buf and api.nvim_buf_is_valid(state.buf)) then
+      return
+    end
+    local target = compute_target()
+    local diff = target - state.shown
+    if math.abs(diff) > 0.001 then
+      state.shown = state.shown + diff * 0.12
+      if math.abs(target - state.shown) < 0.003 then
+        state.shown = target
+      end
+      render()
+      flush()
+    end
+  end))
+end
+
+local function stop_anim()
+  if state.anim then
+    pcall(function()
+      state.anim:stop()
+      state.anim:close()
+    end)
+    state.anim = nil
+  end
+end
+
 -- public API ---------------------------------------------------------------
 
 -- steps: list of { key = '...', label = '...' } in display order.
@@ -178,6 +243,7 @@ function M.show(steps)
     return -- already up
   end
   state.steps, state.order, state.done, state.closing = {}, {}, 0, false
+  state.shown = 0
   for _, s in ipairs(steps or {}) do
     state.steps[s.key] = { label = s.label, done = false }
     state.order[#state.order + 1] = s.key
@@ -204,6 +270,8 @@ function M.show(steps)
   vim.wo[state.win].winhighlight = 'Normal:SplashNormal,NormalNC:SplashNormal,EndOfBuffer:SplashNormal'
 
   render()
+  flush() -- paint the empty bar immediately so it's visible from frame one
+  start_anim()
 
   local grp = api.nvim_create_augroup('BaselineSplash', { clear = true })
   api.nvim_create_autocmd({ 'VimResized', 'ColorScheme' }, {
@@ -242,6 +310,11 @@ function M.close()
     return
   end
   state.closing = true
+  -- Land on a full bar for the final frame, then tear down the animation.
+  state.shown = 1
+  render()
+  flush()
+  stop_anim()
   pcall(api.nvim_del_augroup_by_name, 'BaselineSplash')
   if state.timer then
     pcall(function()

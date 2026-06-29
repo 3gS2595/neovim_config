@@ -34,6 +34,11 @@ keymap.set('t', '<C-j>', [[<C-\><C-n><C-w>j]])
 keymap.set('t', '<C-k>', [[<C-\><C-n><C-w>k]])
 keymap.set('t', '<C-l>', [[<C-\><C-n><C-w>l]])
 
+-- Esc leaves terminal-insert for normal mode instantly. NOTE: this shadows Esc
+-- inside terminal buffers (including the Claude pane and shells), so Esc no longer
+-- reaches the program running there (e.g. Claude's Esc-to-interrupt).
+keymap.set('t', '<Esc>', [[<C-\><C-n>]])
+
 -- Resize window. On Alt+arrows, not <C-w>+arrows: <C-w> alone is the Chrome
 -- "close tab" shortcut (baseline.panetabs), and a <C-w><arrow> mapping would make
 -- every <C-w> wait ~timeoutlen to disambiguate before closing.

@@ -20,7 +20,7 @@
 local M = {}
 
 M.config = {
-  fg = '#be19e8', -- inactive tab + pattern fill colour
+  fg = '#ff5f87', -- inactive tab + pattern fill colour
   active = '#ff6600', -- active tab
   close = '#ff5555', -- × button
   fill = '♡ ', -- repeated to fill row 2 beside the tabs
@@ -470,7 +470,7 @@ local function apply_hl()
   vim.api.nvim_set_hl(0, 'PaneTabTop', { fg = c.active, bg = 'NONE', bold = true })
   vim.api.nvim_set_hl(0, 'PaneTabTopNC', { fg = c.fg, bg = 'NONE' })
   vim.api.nvim_set_hl(0, 'PaneTabClose', { fg = c.close, bg = 'NONE', bold = true })
-  vim.api.nvim_set_hl(0, 'PaneTabFill', { fg = c.fg, bg = 'NONE' })
+  vim.api.nvim_set_hl(0, 'PaneTabFill', { fg = c.fg, bg = 'NONE', bold = true })
   vim.api.nvim_set_hl(0, 'PaneTabBar', { bg = 'NONE' })
 end
 

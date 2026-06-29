@@ -2,6 +2,16 @@ return {
   -- Fuzzy finding
   {
     'nvim-telescope/telescope.nvim',
+    -- Lazy: nothing here is needed until you actually open a picker, so load on
+    -- first use rather than at startup (saves ~15ms + the file_browser require).
+    cmd = 'Telescope',
+    keys = {
+      { '<leader>ff', desc = 'Telescope find files' },
+      { '<leader>fg', desc = 'Telescope live grep' },
+      { '<leader>fb', desc = 'Telescope buffers' },
+      { '<leader>fh', desc = 'Telescope help tags' },
+      { '<leader>fe', desc = 'Telescope file browser' },
+    },
     dependencies = {
       'nvim-lua/plenary.nvim',
       'nvim-telescope/telescope-file-browser.nvim',
@@ -83,6 +93,13 @@ return {
   -- Context-aware commenting (uses treesitter for vue/tsx embedded languages)
   {
     'numToStr/Comment.nvim',
+    -- Lazy: load the first time a comment mapping is pressed.
+    keys = {
+      { 'gcc', mode = 'n', desc = 'Comment toggle current line' },
+      { 'gbc', mode = 'n', desc = 'Comment toggle current block' },
+      { 'gc', mode = { 'n', 'x' }, desc = 'Comment toggle linewise' },
+      { 'gb', mode = { 'n', 'x' }, desc = 'Comment toggle blockwise' },
+    },
     dependencies = { 'JoosepAlviste/nvim-ts-context-commentstring' },
     config = function()
       require('Comment').setup({

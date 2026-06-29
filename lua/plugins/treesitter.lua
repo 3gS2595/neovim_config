@@ -17,8 +17,9 @@ return {
     end,
   },
 
-  -- Auto-close/rename HTML tags
-  { 'windwp/nvim-ts-autotag', opts = {} },
+  -- Auto-close/rename HTML tags. Only relevant while editing, so load on the
+  -- first insert rather than sourcing its plugin file at startup (~14ms saved).
+  { 'windwp/nvim-ts-autotag', event = 'InsertEnter', opts = {} },
 
   -- Embedded-language commentstring (consumed by Comment.nvim in editor.lua)
   {

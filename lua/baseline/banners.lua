@@ -46,7 +46,7 @@ M.config = {
   v_height_offset = 0,
 
   -- Foreground colour for everything.
-  fg = '#be19e8',
+  fg = '#ff5f87',
 }
 
 local function dw(s)
@@ -129,7 +129,7 @@ local function clear_overlay()
   overlay.wins = {}
 end
 
-local function draw_one(row, col, height)
+local function draw_one(row, col, height, zindex)
   if height < 1 then
     return
   end
@@ -143,7 +143,10 @@ local function draw_one(row, col, height)
     width = 1,
     height = height,
     focusable = false,
-    zindex = 30, -- below typical plugin floats (telescope/noice) so they cover us
+    -- 30 keeps separators below typical plugin floats (telescope/noice) so those
+    -- cover us; a junction float is bumped to 36 (just above the pane-tab overlay
+    -- at 35) so its heart wins at the crossing column. Both stay below plugins.
+    zindex = zindex or 30,
     style = 'minimal',
     noautocmd = true, -- creating the float must not retrigger our own redraw
   })
@@ -158,6 +161,45 @@ local function redraw()
   clear_overlay()
   if overlay.enabled then
     local c = M.config
+
+    -- Snapshot every non-floating window's rectangle up front, so a separator can
+    -- tell what sits directly BELOW its bottom edge: a wider pane spanning ACROSS
+    -- its column (a horizontal divider it should meet), versus just the next pane
+    -- stacked in the same column (whose own separator already continues the line).
+    local rects = {}
+    for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
+      if api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' then
+        local pos = api.nvim_win_get_position(win)
+        rects[#rects + 1] = {
+          top = pos[1],
+          left = pos[2],
+          width = api.nvim_win_get_width(win),
+          winbar = api.nvim_get_option_value('winbar', { win = win }) ~= '',
+        }
+      end
+    end
+
+    -- The pane that the separator ending at `row`, column `col` runs into below.
+    -- Take the NEAREST window beneath whose horizontal span reaches `col` (a same-
+    -- column neighbour has `col` as its own right edge; a wider pane contains it).
+    -- Only a wider one (col strictly inside) is a horizontal divider crossing our
+    -- column -- a same-column neighbour just continues the line via its own
+    -- separator, so return nil for it (and for the screen edge).
+    local function pane_below(row, col)
+      local best
+      for _, r in ipairs(rects) do
+        if r.top > row and r.left <= col and col <= r.left + r.width then
+          if not best or r.top < best.top then
+            best = r
+          end
+        end
+      end
+      if best and col < best.left + best.width then
+        return best
+      end
+      return nil
+    end
+
     for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
       if api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' then
         local pos = api.nvim_win_get_position(win)
@@ -180,7 +222,31 @@ local function redraw()
           -- glyph onto the statusline row.
           local last = vim.o.lines - 1 - (vim.o.laststatus == 3 and 1 or 0)
           local bottom = math.min(top + height - 1, last)
-          draw_one(top + c.v_row_offset, col, bottom - top + 1 + c.v_height_offset)
+          -- At the editor's top edge the neighbouring panes open with a 2-row tab
+          -- whose heart-fill divider is the SECOND row (the first is just the tab
+          -- tops, ╭──╮). Drop this separator's first row so it begins on that heart
+          -- line and meets the horizontal tab there, rather than poking a lone glyph
+          -- up beside the tab tops. (Only separators touching row 0 -- the ones
+          -- bordering the top tabs -- not the stacked tree-column ones.)
+          if pos[1] == 0 then
+            top = top + 1
+          end
+          -- If a wider pane sits below this separator spanning across its column
+          -- (e.g. the full-width bottom terminal under the tree|code split), the
+          -- vertical line otherwise dies a few rows short of that pane's
+          -- horizontal heart divider -- across the blank inter-window divider row
+          -- and the pane's own winbar (a 2-row tab puts the heart FILL on its
+          -- overlay row, = winbar + 1). Extend the separator down onto that heart
+          -- row so the two meet on the same line, and lift it above the pane-tab
+          -- overlay so the heart shows at the crossing.
+          local zindex
+          local w = pane_below(bottom, col)
+          if w then
+            local heart = w.winbar and (w.top + 1) or w.top
+            bottom = math.min(heart, last)
+            zindex = 36
+          end
+          draw_one(top + c.v_row_offset, col, bottom - top + 1 + c.v_height_offset, zindex)
         end
       end
     end
@@ -212,8 +278,8 @@ end
 -- ---------------------------------------------------------------------------
 
 local function apply_hl()
-  vim.api.nvim_set_hl(0, 'WinSeparator', { fg = M.config.fg, bg = 'NONE' })
-  vim.api.nvim_set_hl(0, 'BannerVSep', { fg = M.config.fg, bg = 'NONE' })
+  vim.api.nvim_set_hl(0, 'WinSeparator', { fg = M.config.fg, bg = 'NONE', bold = true })
+  vim.api.nvim_set_hl(0, 'BannerVSep', { fg = M.config.fg, bg = 'NONE', bold = true })
 end
 
 function M.setup()

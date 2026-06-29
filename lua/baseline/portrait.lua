@@ -48,8 +48,8 @@ M.config = {
   -- throttles work -- we only repaint when the cursor crosses into a new cell.
   yaw_steps = 15, -- horizontal angles (left..right) -> sheet columns
   pitch_steps = 9, -- vertical angles (up..down) -> sheet rows
-  -- Cells are ~twice as tall as wide; scale vertical mouse delta into the same
-  -- visual units as horizontal so a "square" of cursor travel maps evenly.
+  -- Terminal cells are ~twice as tall as wide; enforce_column uses this to size the
+  -- portrait windows into true visual squares (rows ~= cols / aspect).
   cell_aspect = 2.0,
   sheet = nil, -- resolved in setup() to <config>/portrait/atlas/sheet.png
   image_id = 1000, -- kitty image id for the sheet (one resident image, shared by both panes)
@@ -149,10 +149,17 @@ end
 
 -- mouse -> pose ------------------------------------------------------------
 
--- Where is the cursor relative to THIS pane's centre? Returns normalized
--- (nx, ny) in [-1, 1] in *visual* space (vertical corrected for cell aspect),
--- with +x right and +y down. Computed from screen cells, so it tracks the mouse
--- anywhere on screen, not just inside the pane.
+-- Where is the cursor relative to THIS pane's centre, measured against the FULL
+-- Neovim window? Returns normalized (nx, ny) in [-1, 1] with +x right and +y down:
+-- 0 at the pane centre and ±1 only when the cursor reaches a window EDGE, so the head
+-- ramps gradually across the whole window and hits full tilt only near the edges.
+--
+-- The portraits sit in the LEFT column, so the centre is off-centre in the window --
+-- the gap to the right edge is much bigger than to the left. So each direction is
+-- normalized by its OWN distance to the edge it's heading toward (right vs left, down
+-- vs up); that pins full-left to the window's left edge and full-right to its right
+-- edge, instead of the old code that maxed out within a pane-width of the portrait
+-- (denominator was the tiny pane, not the window).
 local function cursor_offset(pane)
   local mp = vim.fn.getmousepos()
   -- Reuse the square geometry cached by enforce_column (refreshed on every layout
@@ -163,9 +170,16 @@ local function cursor_offset(pane)
   -- getmousepos is 1-based and screen-relative; with showtabline=0 the editor
   -- grid starts at screen row/col 1, so subtract 1 to match win position.
   local dx = (mp.screencol - 1) - cx
-  local dy = ((mp.screenrow - 1) - cy) * M.config.cell_aspect
-  local nx = dx / math.max(1, g.width / 2)
-  local ny = dy / math.max(1, g.height) -- half-visual-height = h cells (h*aspect/2)
+  local dy = (mp.screenrow - 1) - cy
+  -- Distance from the centre to each window edge (vim.o.columns/lines = full editor
+  -- size in cells). Guard against a zero gap when the centre sits on an edge, then
+  -- normalize by the gap toward whichever edge the cursor is on so ±1 lands there.
+  local right = math.max(1, vim.o.columns - cx)
+  local left = math.max(1, cx)
+  local down = math.max(1, vim.o.lines - cy)
+  local up = math.max(1, cy)
+  local nx = dx / (dx >= 0 and right or left)
+  local ny = dy / (dy >= 0 and down or up)
   return nx, ny
 end
 
