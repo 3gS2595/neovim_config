@@ -299,9 +299,47 @@ function M.complete(key)
   end
   s.done = true
   state.done = state.done + 1
+  -- Snap the bar up to this milestone's REAL floor and paint it NOW. The eased
+  -- animation timer can't run while the main loop is blocked (terminal spawn,
+  -- portrait sprite transmit), so without this forced frame the back-to-back
+  -- milestones inside the synchronous layout build would never become visible --
+  -- you'd only ever catch one stray frame. The timer still trickles ABOVE this
+  -- floor toward the next step when the loop is free.
+  state.shown = math.max(state.shown, state.done / state.total)
   render()
+  flush()
   if state.done >= state.total then
     vim.defer_fn(M.close, M.config.linger_ms)
+  end
+end
+
+-- Report fractional progress WITHIN a not-yet-complete step, so a long step can
+-- fill its own slice of the bar instead of sitting at its floor. `frac` is 0..1
+-- of that one step; we map it into the step's slice [idx/total, (idx+1)/total]
+-- using the step's fixed position (not the live done count), so async completion
+-- races can't throw the mapping off. Snaps + forces a paint like complete(),
+-- since the caller (e.g. the portrait sprite transmit) blocks the loop.
+function M.progress(key, frac)
+  if state.closing or state.total == 0 then
+    return
+  end
+  local s = state.steps[key]
+  if not s or s.done then
+    return
+  end
+  local idx = 0
+  for i, k in ipairs(state.order) do
+    if k == key then
+      idx = i - 1
+      break
+    end
+  end
+  frac = math.max(0, math.min(0.99, frac or 0))
+  local target = (idx + frac) / state.total
+  if target > state.shown then
+    state.shown = target
+    render()
+    flush()
   end
 end
 
@@ -340,8 +378,8 @@ function M.setup()
   api.nvim_create_user_command('Splash', function()
     local steps = {
       { key = 'plugins', label = 'loading plugins' },
-      { key = 'layout', label = 'building layout' },
       { key = 'claude', label = 'starting claude' },
+      { key = 'layout', label = 'building layout' },
       { key = 'portrait', label = 'loading portrait sprite sheet' },
       { key = 'fastfetch', label = 'rendering splash' },
     }

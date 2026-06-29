@@ -295,6 +295,14 @@ local function transmit_sheet()
   -- kitty wants URL-safe base64 (image.nvim maps '-' -> '/' for the same reason).
   payload = vim.base64.encode(payload):gsub('%-', '/')
   local tty = kitty.ssh and kitty.tty or nil
+  -- NB: do NOT paint anything (splash repaint, redraw, etc.) between the chunks
+  -- below. The chunks stream to the terminal fd via the kitty libuv tty handle,
+  -- and a Neovim UI flush writes to that SAME fd through a different, unsynchronised
+  -- path -- forcing one mid-loop splices Neovim's bytes into the middle of the
+  -- in-flight PNG transmission, so the sheet fails to decode and the heads vanish
+  -- (intermittently, since it's timing-dependent). A previous progress-reporting
+  -- hook here did exactly that and is why portraits became flaky; keep this loop
+  -- a pure, uninterrupted write.
   local first = true
   for i = 1, #payload, KITTY_CHUNK do
     local piece = payload:sub(i, i + KITTY_CHUNK - 1):gsub('%s', '')

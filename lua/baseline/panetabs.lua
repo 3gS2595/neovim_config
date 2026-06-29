@@ -24,6 +24,10 @@ M.config = {
   active = '#ff6600', -- active tab
   close = '#ff5555', -- × button
   fill = '♡ ', -- repeated to fill row 2 beside the tabs
+  -- Inset the tabs by this many display columns, so the separator pattern shows
+  -- to their LEFT too (a small gap from the pane edge before the first tab),
+  -- matching the trailing fill. 0 = tabs flush against the left edge.
+  lead = 4,
   -- Row 2 sits at the pane's first text row, directly under the winbar tabs
   -- (nvim_win_get_position's row IS the winbar row, so +1 = first text row).
   row_offset = 1,
@@ -153,6 +157,18 @@ local function build(win, role, width)
   local cur = vim.api.nvim_win_get_buf(win)
   local top, title, thl, clicks = {}, {}, {}, {}
   local disp, tb = 0, 0 -- display column / title byte cursor
+  -- Inset the tabs by config.lead columns so they start part way in, framed by
+  -- the separator pattern. Row 1 (the tab-tops row) gets plain spaces -- it never
+  -- carries the pattern -- while row 2 (the title row) gets the celestial fill,
+  -- so the pattern shows to the LEFT of the tabs just as it does to their right.
+  local lead = M.config.lead or 0
+  if lead > 0 then
+    top[#top + 1] = string.rep(' ', lead)
+    local lp = pattern(lead)
+    title[#title + 1] = lp
+    thl[#thl + 1] = { 0, #lp, 'PaneTabFill' }
+    disp, tb = lead, #lp
+  end
   for _, b in ipairs(buffers_for(role)) do
     local g = b == cur and 'PaneTabTop' or 'PaneTabTopNC'
     local body = ' ' .. label(b, role) .. ' ' .. CLOSE .. ' ' -- ' name × '

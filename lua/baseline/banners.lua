@@ -45,6 +45,11 @@ M.config = {
   v_row_offset = 0,
   v_height_offset = 0,
 
+  -- Draw an outer heart frame on the window-facing pane edges (left column,
+  -- right column, bottom row) so every edge pane closes into a rectangle. The
+  -- top is left to the tab/banner row, which already caps the top panes.
+  border = true,
+
   -- Foreground colour for everything.
   fg = '#ff5f87',
 }
@@ -156,6 +161,37 @@ local function draw_one(row, col, height, zindex)
   end
 end
 
+-- A horizontal heart-fill row (the bottom window-edge border): '♡ ' tiled to
+-- `width` display columns, drawn as a 1-row float -- the horizontal counterpart
+-- of draw_one. The verticals (solid hearts) cross it at the corners.
+local function draw_hrow(row, col, width, zindex)
+  if width < 1 then
+    return
+  end
+  local line = string.rep('♡ ', math.floor(width / 2))
+  if width % 2 == 1 then
+    line = line .. '♡'
+  end
+  local buf = api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = 'wipe'
+  api.nvim_buf_set_lines(buf, 0, -1, false, { line })
+  local ok, win = pcall(api.nvim_open_win, buf, false, {
+    relative = 'editor',
+    row = row,
+    col = col,
+    width = width,
+    height = 1,
+    focusable = false,
+    zindex = zindex or 36,
+    style = 'minimal',
+    noautocmd = true,
+  })
+  if ok then
+    vim.wo[win].winhighlight = 'Normal:BannerVSep,NormalNC:BannerVSep'
+    overlay.wins[#overlay.wins + 1] = win
+  end
+end
+
 local function redraw()
   overlay.busy = true
   clear_overlay()
@@ -247,6 +283,132 @@ local function redraw()
             zindex = 36
           end
           draw_one(top + c.v_row_offset, col, bottom - top + 1 + c.v_height_offset, zindex)
+        end
+      end
+    end
+
+    -- Outer window-edge border: close every edge-facing pane into a heart
+    -- rectangle. Left & right are solid heart columns (like the interior
+    -- separators). The bottom row is NOT drawn here: it is the lualine status
+    -- line, whose middle is heart-filled (see heart_fill in plugins/ui.lua), so
+    -- the status line and the bottom separator are the same row. The verticals
+    -- therefore run all the way DOWN ONTO that status-line row (last = the very
+    -- bottom row, not one above it) so the frame closes onto the heart line at the
+    -- bottom corners. The TOP is intentionally left to the tab/banner row (its
+    -- heart line already caps the top panes); both verticals start at row 1 --
+    -- matching the interior separators' top trim -- so they meet the tab cap at
+    -- the top corners. Drawn at 36 (above pane content AND the pane-tab overlays)
+    -- so the frame stays unbroken over the terminals.
+    if c.border then
+      local cols = vim.o.columns
+      local last = vim.o.lines - 1
+
+      -- The left edge (col 0) runs over the kitty PORTRAIT panes. A float on top
+      -- of a kitty graphics placement makes some terminals (notably WezTerm over
+      -- SSH) drop the image entirely, blanking the head -- so split the left border
+      -- to SKIP those panes' rows, leaving the portrait squares untouched (their
+      -- own image edge stands in for the border there). Right & bottom never cross
+      -- a portrait, so they stay whole.
+      local skip = {}
+      local term_top -- top row of the bottom-left terminal pane (col 0), if any
+      for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
+        if api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' then
+          local pos = api.nvim_win_get_position(win)
+          if pos[2] == 0 then
+            local buf = api.nvim_win_get_buf(win)
+            if vim.bo[buf].filetype == 'portrait' then
+              local hgt = api.nvim_win_get_height(win)
+              skip[#skip + 1] = { top = pos[1], bot = pos[1] + hgt - 1 }
+            elseif vim.bo[buf].buftype == 'terminal' then
+              term_top = pos[1]
+            end
+          end
+        end
+      end
+      table.sort(skip, function(a, b)
+        return a.top < b.top
+      end)
+      local r = 1 -- next un-drawn row of the left edge
+      for _, s in ipairs(skip) do
+        if s.top > r then
+          draw_one(r, 0, s.top - r, 36) -- segment above this portrait
+        end
+        r = math.max(r, s.bot + 1)
+      end
+      if r <= last then
+        -- If the bottom-left pane is the terminal, start the edge on its heart
+        -- tab row (winbar + 1) rather than at the top of its 2-row tab, so the
+        -- left vertical meets the horizontal tab divider at the corner instead
+        -- of poking up past it through the ╭──╮ tab-tops row above.
+        local seg_top = r
+        if term_top and term_top + 1 > seg_top then
+          seg_top = term_top + 1
+        end
+        if seg_top <= last then
+          draw_one(seg_top, 0, last - seg_top + 1, 36) -- segment below the last portrait
+        end
+      end
+
+      draw_one(1, cols - 1, last, 36) -- right edge (last column), rows 1..last
+      -- No bottom edge row: the heart-filled status line is the bottom separator.
+
+      -- File-tree box. The tree sits sandwiched between the two portraits in the
+      -- left column; the outer frame above already gives it a left edge (the col 0
+      -- segment drawn between the portraits) and the interior loop draws its right
+      -- edge (the tree|code separator), but its top and bottom seams are open. Add
+      -- a heart row across each so the tree closes into a rectangle while the
+      -- portraits stay open (separators only where they meet another pane).
+      --
+      -- Draw on the blank inter-window divider row just outside the tree (top-1 /
+      -- bottom+1) when one exists, so we cover the gap rather than eat a tree line.
+      -- If a portrait abuts the tree with no divider, fall back onto the tree's own
+      -- edge row -- never onto a portrait row, where a float would drop the kitty
+      -- head. Span just the tree's own columns (0..tw-1): the vertical connector
+      -- below owns the separator column (tw), so the heart row must STOP one short
+      -- of it -- the row tiles "♡ " and its blank cell would otherwise land on the
+      -- separator column and overwrite the connector's heart at the corner.
+      local function in_portrait(row)
+        for _, s in ipairs(skip) do
+          if row >= s.top and row <= s.bot then
+            return true
+          end
+        end
+        return false
+      end
+      for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
+        if
+          api.nvim_win_is_valid(win)
+          and api.nvim_win_get_config(win).relative == ''
+          and api.nvim_win_get_position(win)[2] == 0
+          and vim.bo[api.nvim_win_get_buf(win)].filetype == 'NvimTree'
+        then
+          local pos = api.nvim_win_get_position(win)
+          local tw = api.nvim_win_get_width(win)
+          local th = api.nvim_win_get_height(win)
+          local top_row = in_portrait(pos[1] - 1) and pos[1] or pos[1] - 1
+          local bot_row = in_portrait(pos[1] + th) and (pos[1] + th - 1) or (pos[1] + th)
+          if top_row >= 0 then
+            draw_hrow(top_row, 0, tw, 36)
+          end
+          if bot_row <= last then
+            draw_hrow(bot_row, 0, tw, 36)
+          end
+          -- Close the tree box's right side. The tree|code separator is otherwise
+          -- drawn only piecewise -- the interior loop gives each stacked tree-column
+          -- window (portrait / tree / portrait) a separator over its OWN rows only,
+          -- so the two divider rows between them (= the tree's top and bottom seam
+          -- rows) are left uncovered and the heart rows hit a void at the corner.
+          -- Draw one continuous vertical at the tree's right-edge column (tw)
+          -- spanning both seam rows. The heart rows stop at tw-1, so this column
+          -- is the connector's alone -- its solid hearts fill the corners with no
+          -- blank cell from the heart-row tiling to overwrite them.
+          local sep = pos[2] + tw
+          local v_top = math.max(0, top_row)
+          local v_bot = math.min(bot_row, last)
+          if v_bot >= v_top then
+            draw_one(v_top, sep, v_bot - v_top + 1, 36)
+          end
+          break
         end
       end
     end

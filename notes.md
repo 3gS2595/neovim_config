@@ -10,7 +10,12 @@
     - make movement more obvious
   - cat toy ball cut in half
     - reverse is spherical cage??
-  TEDDY BEAR SHAPE FRAME <3
+  - TEDDY BEAR SHAPE FRAME <3
+  - ADD SLIGHT FRAME TILT
+  - EXCHANGE HORSE FOR HUNTERS PONY < 3 < 3
+- bottom avatar grins lagrer the longer you dont use mouse
+- top avatar;s eyes get happier/angrier the longer you dont use mouse
+- if you use mouse both/standard is unhappy angry 
 
 - webui to customize fastfetch
   - multi layers your can order

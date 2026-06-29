@@ -88,3 +88,20 @@ done
 magick montage "${tiles[@]}" -tile "${YAW_STEPS}x${PITCH_STEPS}" -geometry +0+0 \
   -background none "atlas/sheet.png"
 echo "montaged -> atlas/sheet.png ($((YAW_STEPS * SIZE))x$((PITCH_STEPS * SIZE))) [$ENGINE]"
+
+# Palette-quantize the sheet IN PLACE (same step as build.sh). The runtime transmits
+# these bytes once over the wire at startup (kitty f=100, raw PNG) and that transmit is
+# the dominant start cost, so shrinking the file shrinks the start. 256 colors collapses
+# the full RGBA sheet (~19 MB) to a palette PNG (~2 MB, ~8x); the keyed/alpha background
+# is preserved as the palette's binary (tRNS) transparency. Still a PNG, so portrait.lua
+# is unchanged. -dither None: on smooth renders dithering both raises the error and
+# inflates the PNG, so a flat map is smaller AND closer to the original.
+#
+# NOTE: Blender's PBR/reflection output has richer gradients than the Lua rasterizer, so
+# if you see banding on a metallic/specular sweep, raise COLORS (320/512) here.
+COLORS=256
+before=$(wc -c <atlas/sheet.png)
+magick atlas/sheet.png -strip -dither None -colors "$COLORS" "PNG8:atlas/sheet.tmp.png"
+mv -f atlas/sheet.tmp.png atlas/sheet.png
+after=$(wc -c <atlas/sheet.png)
+echo "quantized -> atlas/sheet.png (${COLORS} colors, $((before / 1024)) KiB -> $((after / 1024)) KiB)"

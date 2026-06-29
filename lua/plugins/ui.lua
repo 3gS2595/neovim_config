@@ -31,6 +31,51 @@ return {
 
       custom_theme.insert.c.bg = 'NONE'
 
+      -- Heart filler for the status line. The status line and the bottom pane
+      -- separator are now the SAME row: the separate bottom heart border that
+      -- baseline/banners.lua used to draw one row above the status line is gone,
+      -- and instead the status line's middle is filled with the same spaced-heart
+      -- pattern as the other dividers, with the mode/diff blocks on the left and
+      -- encoding/branch on the right riding on top of it.
+      --
+      -- lualine gives a component no width hint, so we MEASURE the other sections:
+      -- evaluate the whole status line with this filler blanked (the `measuring`
+      -- guard makes the nested eval skip us so we don't recurse), which reports the
+      -- columns every other section consumes; the remainder is ours to tile with
+      -- '♡ ' pairs.
+      --
+      -- The catch: nvim_eval_statusline must NOT be called from inside the live
+      -- status-line render (i.e. from heart_fill while Neovim is drawing the
+      -- screen). A re-entrant status-line eval mid-redraw returns inconsistent
+      -- widths, so the heart count jitters frame-to-frame and the line visibly
+      -- flashes. So heart_fill never measures: it just returns a CACHED string.
+      -- The cache is rebuilt by recompute_hearts(), which we only ever call from a
+      -- scheduled (post-redraw) context via the autocmds below -- on the events
+      -- that actually change a section's width (resize, mode change, diagnostics,
+      -- buffer/git changes). When it changes we redrawstatus once to paint it.
+      local heart_fg = require('baseline.banners').config.fg
+      local heart_cache = ''
+      local measuring = false
+      local function heart_fill()
+        return measuring and '' or heart_cache
+      end
+      local function recompute_hearts()
+        measuring = true
+        local ok, res = pcall(vim.api.nvim_eval_statusline, vim.o.statusline, { maxwidth = 0 })
+        measuring = false
+        local new = ''
+        if ok then
+          local avail = vim.o.columns - res.width
+          if avail >= 2 then
+            new = string.rep('♡ ', math.floor(avail / 2))
+          end
+        end
+        if new ~= heart_cache then
+          heart_cache = new
+          vim.cmd('redrawstatus')
+        end
+      end
+
       require('lualine').setup({
         options = {
           theme = custom_theme,
@@ -49,7 +94,17 @@ return {
         sections = {
           lualine_a = { 'mode' },
           lualine_b = { 'diff', 'diagnostics' },
-          lualine_c = { 'filename' },
+          -- The heart filler IS the bottom separator now (see heart_fill above).
+          -- padding = 0 so the measured/rendered widths match exactly (an empty
+          -- padded component and a filled one would differ otherwise). Add
+          -- 'filename' before it here if you want the file name back on this row.
+          lualine_c = {
+            {
+              heart_fill,
+              padding = 0,
+              color = { fg = heart_fg, gui = 'bold' },
+            },
+          },
           lualine_x = {},
           lualine_y = { 'encoding', 'fileformat', 'filetype' },
           lualine_z = { 'branch' },
@@ -126,6 +181,33 @@ return {
         callback = transparent_bars,
       })
       transparent_bars()
+
+      -- Rebuild the heart fill (see heart_fill / recompute_hearts above) out of
+      -- the render path. vim.schedule defers to a normal, post-redraw context so
+      -- the nvim_eval_statusline measurement is never re-entrant -- the thing that
+      -- made the bottom line flash. These events cover everything that changes a
+      -- section's width: terminal/window resizes, mode switches (the 'a' block
+      -- grows for V-BLOCK etc.), diagnostics, and buffer/git changes that move the
+      -- right-hand sections. A pending flag coalesces bursts into one rebuild.
+      local pending = false
+      local function schedule_hearts()
+        if pending then
+          return
+        end
+        pending = true
+        vim.schedule(function()
+          pending = false
+          recompute_hearts()
+        end)
+      end
+      vim.api.nvim_create_autocmd({
+        'VimResized', 'WinResized', 'WinNew', 'WinClosed', 'WinEnter',
+        'ModeChanged', 'DiagnosticChanged', 'BufWinEnter', 'TabEnter', 'VimEnter',
+      }, {
+        group = vim.api.nvim_create_augroup('HeartStatusFill', { clear = true }),
+        callback = schedule_hearts,
+      })
+      schedule_hearts()
     end,
   },
 

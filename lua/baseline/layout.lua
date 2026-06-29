@@ -58,10 +58,13 @@ function M.reset()
 end
 
 -- The startup milestones the splash bar tracks, in the order they're shown.
+-- Order MUST match the order build() calls splash.complete() in, so the status
+-- label always names the step actually in flight: plugins, then the Claude
+-- terminal, then the window juggling, then the async portrait + fastfetch tail.
 local SPLASH_STEPS = {
   { key = 'plugins', label = 'loading plugins' },
-  { key = 'layout', label = 'building layout' },
   { key = 'claude', label = 'starting claude' },
+  { key = 'layout', label = 'building layout' },
   { key = 'portrait', label = 'loading portrait sprite sheet' },
   { key = 'fastfetch', label = 'rendering splash' },
 }
