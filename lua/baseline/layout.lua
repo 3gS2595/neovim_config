@@ -20,6 +20,43 @@ local M = {}
 
 local splash = require('baseline.splash')
 
+-- Fixed default width for the file-tree column. nvim-tree's adaptive_size is off
+-- (see plugins/editor.lua) and we no longer size the column to its content, so the
+-- tree keeps this width and never resizes itself. editor.lua reads M.TREE_WIDTH so
+-- there's a single source of truth.
+M.TREE_WIDTH = 31
+
+-- Remembered window handles and the sizes computed at startup, so :LayoutReset can
+-- restore the startup proportions on demand. Populated by fit_layout_to_fastfetch.
+local layout_state = nil
+
+-- Apply the startup pane sizes from layout_state: Claude takes everything outside
+-- the left area, the tree column is the fixed default width, and the bottom terminal
+-- is the splash height. Used both on first build and by :LayoutReset.
+local function apply_sizes()
+  local s = layout_state
+  if not s then return end
+  if vim.api.nvim_win_is_valid(s.claude) then
+    pcall(vim.api.nvim_win_set_width, s.claude, math.max(1, vim.o.columns - s.left_w - 1))
+  end
+  if s.treecol and vim.api.nvim_win_is_valid(s.treecol) then
+    pcall(vim.api.nvim_win_set_width, s.treecol, math.max(12, math.min(s.left_w - 20, M.TREE_WIDTH)))
+  end
+  if vim.api.nvim_win_is_valid(s.bottom) then
+    pcall(vim.api.nvim_win_set_height, s.bottom, s.bottom_height)
+  end
+end
+
+-- Restore the panes to their startup sizes (tree width, Claude width, bottom
+-- terminal height). Exposed as the :LayoutReset user command.
+function M.reset()
+  if not layout_state then
+    vim.notify('LayoutReset: no startup layout to restore', vim.log.levels.WARN)
+    return
+  end
+  apply_sizes()
+end
+
 -- The startup milestones the splash bar tracks, in the order they're shown.
 local SPLASH_STEPS = {
   { key = 'plugins', label = 'loading plugins' },
@@ -70,42 +107,36 @@ local function fit_layout_to_fastfetch(claude, bottom, bottom_job, treecol)
 
     -- Width: left area = fastfetch's natural width; Claude takes the rest. Cap so
     -- Claude keeps a usable minimum on a narrow screen (-1 for the column divider).
+    -- The tree column inside the left area is the fixed M.TREE_WIDTH (no
+    -- content-based sizing), so it keeps its width and never resizes itself.
     local left_w = math.max(20, math.min(maxw, vim.o.columns - 20))
-    if vim.api.nvim_win_is_valid(claude) then
-      pcall(vim.api.nvim_win_set_width, claude, math.max(1, vim.o.columns - left_w - 1))
-    end
 
-    -- Within the left area, make the tree column only as wide as its widest entry
-    -- (so no file-tree item is clipped) and let the code view absorb the rest. We
-    -- size it once from the rendered tree buffer rather than nvim-tree's
-    -- adaptive_size (which refights every refresh). textoff accounts for the tree's
-    -- signcolumn/gutter; cap so the code view keeps a usable minimum.
-    if treecol and vim.api.nvim_win_is_valid(treecol) then
-      local tbuf = vim.api.nvim_win_get_buf(treecol)
-      local content = 0
-      for _, l in ipairs(vim.api.nvim_buf_get_lines(tbuf, 0, -1, false)) do
-        content = math.max(content, vim.fn.strdisplaywidth(l))
+    -- Height of the bottom terminal: enough rows to show the splash (which is
+    -- `left_w` wide, so account for wrapping) plus the resting prompt line.
+    local rows = 0
+    for _, line in ipairs(vim.split(res.stdout or '', '\n', { trimempty = false })) do
+      local clean = line:gsub('\27%[[0-9;]*m', '')
+      if clean ~= '' then
+        rows = rows + math.max(1, math.ceil(vim.fn.strdisplaywidth(clean) / left_w))
       end
-      local info = vim.fn.getwininfo(treecol)[1]
-      local gutter = (info and info.textoff) or 0
-      local tw = math.max(12, math.min(content + gutter, left_w - 20))
-      pcall(vim.api.nvim_win_set_width, treecol, tw)
     end
+    local bottom_height = math.max(3, math.min(vim.o.lines - 6, rows + 2))
 
-    -- Now the bottom terminal is `left_w` wide: render the splash there (no wrap as
-    -- long as left_w >= maxw) and size the pane to fit it + the resting prompt line.
+    -- Remember the startup sizes + windows so :LayoutReset can restore them, then
+    -- apply them.
+    layout_state = {
+      claude = claude,
+      bottom = bottom,
+      treecol = treecol,
+      left_w = left_w,
+      bottom_height = bottom_height,
+    }
+    apply_sizes()
+
+    -- The left area is now `left_w` wide: render the splash into the bottom terminal
+    -- (no wrap as long as left_w >= maxw).
     if bottom_job then
       pcall(vim.api.nvim_chan_send, bottom_job, 'command clear; fastfetch\n')
-    end
-    if vim.api.nvim_win_is_valid(bottom) then
-      local rows = 0
-      for _, line in ipairs(vim.split(res.stdout or '', '\n', { trimempty = false })) do
-        local clean = line:gsub('\27%[[0-9;]*m', '')
-        if clean ~= '' then
-          rows = rows + math.max(1, math.ceil(vim.fn.strdisplaywidth(clean) / left_w))
-        end
-      end
-      pcall(vim.api.nvim_win_set_height, bottom, math.max(3, math.min(vim.o.lines - 6, rows + 2)))
     end
 
     -- Splash rendered: the last startup milestone is done.
@@ -178,6 +209,12 @@ local function build()
 end
 
 function M.setup()
+  -- Restore the startup pane proportions (tree width, Claude width, bottom
+  -- terminal height) after any manual resizing.
+  vim.api.nvim_create_user_command('LayoutReset', M.reset, {
+    desc = 'Reset pane sizes to the startup layout defaults',
+  })
+
   vim.api.nvim_create_autocmd('VimEnter', {
     group = vim.api.nvim_create_augroup('StartupLayout', { clear = true }),
     callback = function()
