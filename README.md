@@ -1,26 +1,11 @@
 ((Doing extensive personalization, may not run on your machine, portraits require Kitty Graphics Protocol))
 <img width="1949" height="1192" alt="NVIM EXAMPLE" src="https://github.com/user-attachments/assets/c5969312-6899-41ca-96b4-2f48bd4496e5" />
 
-## Structure
-
-```
-init.lua                  -- core modules + lazy.nvim bootstrap
-lua/baseline/base.lua     -- editor options
-lua/baseline/highlights.lua -- visual options + yank highlight
-lua/baseline/maps.lua     -- keymaps
-lua/baseline/platform.lua -- OS-specific clipboard integration
-lua/baseline/commands.lua -- custom user commands
-lua/plugins/              -- lazy.nvim plugin specs, grouped by domain
-colors/                   -- wildcharm-redux colorscheme
-```
-
 ## Portrait pane
 
 The tree column is bracketed by two square "portrait" panes showing a 3D head
-that turns to look at your mouse (kitty graphics protocol; see
-`lua/baseline/portrait.lua`). The head is not rendered live — it's cropped from a
-precomputed sprite sheet at `portrait/atlas/sheet.png`, a grid of poses across a
-range of yaw/pitch angles. You can swap in your own model and rebuild that sheet.
+that turns to look at your mouse; - it's cropped from a
+precomputed sprite sheet at `portrait/atlas/sheet.png`.
 
 ### Building the sheet
 
@@ -33,11 +18,9 @@ Options:
 
 - **`--size N`** — cell size in pixels (default `320`).
 - **`--color`** — shade any model that ships an `.mtl` from its material diffuse
-  (`Kd`). Models without materials keep the default celestial purple→pink ramp
-  either way, so you can mix a colored model with an uncolored one.
+  (`Kd`).
 
 ```bash
-./build.sh suzanne.obj                      # head only, ramp shading
 ./build.sh head.obj frame.obj               # moving head inside a still frame
 ./build.sh --color --size 384 head.obj frame.obj   # bigger, material-colored
 ```
@@ -74,8 +57,6 @@ Options:
 
 ### Treesitter Configuration
 - Syntax highlighting and parsing powered by [`nvim-treesitter`](https://github.com/nvim-treesitter/nvim-treesitter) (`master` branch; the `main` rewrite requires Neovim 0.12 nightly).
-- Auto-installed parsers include:
-  - `bash`, `css`, `fish`, `html`, `javascript`, `json`, `lua`, `markdown`, `markdown_inline`, `php`, `regex`, `ruby`, `swift`, `toml`, `tsx`, `typescript`, `vue`, `yaml`
 
 ### Command Line & Notifications
 - Enhanced command line UI with [`noice.nvim`](https://github.com/folke/noice.nvim) plus dependencies [`nui.nvim`](https://github.com/MunifTanjim/nui.nvim) and [`nvim-notify`](https://github.com/rcarriga/nvim-notify).
