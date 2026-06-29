@@ -23,7 +23,8 @@ return {
       vim.keymap.set('n', '<leader>fg', builtin.live_grep, { desc = 'Telescope live grep' })
       vim.keymap.set('n', '<leader>fb', builtin.buffers, { desc = 'Telescope buffers' })
       vim.keymap.set('n', '<leader>fh', builtin.help_tags, { desc = 'Telescope help tags' })
-      vim.keymap.set('n', '<C-t>', '<Cmd>Telescope file_browser<CR>', { desc = 'Telescope file browser' })
+      -- <leader>fe, not <C-t>: Ctrl-T is the Chrome "new tab" shortcut (baseline.panetabs).
+      vim.keymap.set('n', '<leader>fe', '<Cmd>Telescope file_browser<CR>', { desc = 'Telescope file browser' })
     end,
   },
 
@@ -55,9 +56,12 @@ return {
       require('nvim-tree').setup({
         on_attach = on_attach,
         view = {
-          -- adaptive_size auto-resized the tree to its content on every refresh,
-          -- which (with preserve_window_proportions off) fought manual pane
-          -- resizing. Keep the width the user gives it and don't disturb siblings.
+          -- Fixed default width (shared with baseline.layout so the column it sizes
+          -- and nvim-tree agree). adaptive_size is left off so the tree never
+          -- auto-resizes to its content on refresh; preserve_window_proportions
+          -- keeps a manual resize from disturbing sibling panes. :LayoutReset
+          -- restores this width on demand.
+          width = require('baseline.layout').TREE_WIDTH,
           preserve_window_proportions = true,
         },
       })
