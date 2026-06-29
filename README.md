@@ -1,6 +1,6 @@
 ((Doing extensive personalization, may not run on your machine))
 
-<img width="1949" height="1192" alt="NVIM EXAMPLE" src="https://github.com/user-attachments/assets/f56548c9-a94f-47d1-ac7e-f00d5ff0e49e" />
+<img width="1949" height="1192" alt="NVIM EXAMPLE" src="https://github.com/user-attachments/assets/c5969312-6899-41ca-96b4-2f48bd4496e5" />
 
 ## Structure
 
@@ -25,20 +25,10 @@ range of yaw/pitch angles. You can swap in your own model and rebuild that sheet
 
 ### Building the sheet
 
-The build is two files in `portrait/`: `build.sh` (the driver — the one you run)
-and `render.lua` (a small CPU rasterizer it calls once per pose). Requirements:
-`nvim` (the renderer runs under `nvim -l`) and ImageMagick (`magick`).
-
 ```bash
 cd portrait
 ./build.sh [options] <portrait.obj> [frame.obj]
 ```
-
-- **`portrait.obj`** — the head that turns to look at the mouse (rotates per pose).
-- **`frame.obj`** *(optional)* — a still background/border, baked identically into
-  every pose so it never moves while the head turns. **Order decides the role:**
-  first OBJ is the moving portrait, second is the static frame. Omit the frame to
-  build the head on its own (the previous behavior).
 
 Options:
 
@@ -47,33 +37,11 @@ Options:
   (`Kd`). Models without materials keep the default celestial purple→pink ramp
   either way, so you can mix a colored model with an uncolored one.
 
-**Sizing.** With no frame, the head **auto-fits** the square, so its absolute size
-in Blender doesn't matter. With a frame, the **frame defines the camera view**: it
-fills the square (fully visible), and the portrait is scaled by that same factor —
-so size the head **centered in the frame**, and the head keeps its size/placement
-*relative to the frame*. A head sized larger than the frame deliberately **spills
-off-screen** (the part outside the frame's bounds is clipped). Examples:
-
 ```bash
 ./build.sh suzanne.obj                      # head only, ramp shading
 ./build.sh head.obj frame.obj               # moving head inside a still frame
 ./build.sh --color --size 384 head.obj frame.obj   # bigger, material-colored
 ```
-
-### Exporting from Blender
-
-- Orient the model to **face the camera** (looking down +Z toward the viewer) and
-  **apply transforms** (Object → Apply → All Transforms) before exporting.
-- Export as **Wavefront OBJ**. To use `--color`, export materials too so an `.mtl`
-  sits next to the `.obj` (flat `Kd` diffuse only — textures/`map_Kd` are ignored).
-- Keep the head and frame in a **single shared coordinate space** (export them
-  positioned as you want them to compose); the builder preserves that layout.
-
-### Applying a rebuild
-
-`build.sh` overwrites `portrait/atlas/sheet.png`. Inside a running Neovim, run
-`:Portrait rebuild` to drop the old sheet and pick up the new one without
-restarting.
 
 ## Key Features
 
