@@ -149,7 +149,9 @@ return {
       })
 
       local opts = { silent = true }
-      vim.keymap.set('n', '<C-j>', '<Cmd>Lspsaga diagnostic_jump_next<CR>', opts)
+      -- NB: no <C-j> map here. Ctrl+h/j/k/l are pane navigation (baseline.maps),
+      -- and this runs on LspAttach -- a global <C-j> here would shadow pane-down in
+      -- every LSP buffer. Diagnostics are still navigable via ]d / [d (see above).
       vim.keymap.set('n', 'gl', '<Cmd>Lspsaga show_line_diagnostics<CR>', opts)
       vim.keymap.set('n', 'gt', '<Cmd>Lspsaga goto_type_definition<CR>', opts)
       vim.keymap.set('n', 'gp', '<Cmd>Lspsaga peek_definition<CR>', opts)

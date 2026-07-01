@@ -47,6 +47,12 @@ local function apply_sizes()
   end
 end
 
+-- The bottom terminal window that shows the fastfetch splash, so baseline.splash_images
+-- can anchor kitty images over it. Read-only handle; nil until the layout is built.
+function M.splash_win()
+  return layout_state and layout_state.bottom
+end
+
 -- Restore the panes to their startup sizes (tree width, Claude width, bottom
 -- terminal height). Exposed as the :LayoutReset user command.
 function M.reset()

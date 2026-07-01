@@ -25,14 +25,45 @@ keymap.set('n', 'sv', ':vsplit<Return><C-w>w')
 -- inside the Claude/shell terminals (most of the layout) -- not just file panes.
 -- This shadows the shell's Ctrl+L (clear) / Ctrl+H (backspace) inside terminals;
 -- type `clear` / use Backspace there instead.
-keymap.set({ 'n', 'v' }, '<C-h>', '<C-w>h')
-keymap.set({ 'n', 'v' }, '<C-j>', '<C-w>j')
-keymap.set({ 'n', 'v' }, '<C-k>', '<C-w>k')
-keymap.set({ 'n', 'v' }, '<C-l>', '<C-w>l')
-keymap.set('t', '<C-h>', [[<C-\><C-n><C-w>h]])
-keymap.set('t', '<C-j>', [[<C-\><C-n><C-w>j]])
-keymap.set('t', '<C-k>', [[<C-\><C-n><C-w>k]])
-keymap.set('t', '<C-l>', [[<C-\><C-n><C-w>l]])
+--
+-- The tree column is sandwiched by two 'portrait' scratch panes (baseline.portrait);
+-- those heads are never a useful focus target, so directional motion SKIPS them and
+-- only ever lands on the terminal, code, or file-tree panes.
+local api = vim.api
+local function is_portrait(win)
+  return vim.bo[api.nvim_win_get_buf(win)].filetype == 'portrait'
+end
+
+-- Move focus one window in `dir`, but never leave the cursor on a portrait pane.
+-- If the move lands on a portrait, keep going the SAME direction to step over it to
+-- the next real pane (so up-from-terminal passes the head onto the tree, and
+-- down-from-tree passes it onto the terminal). If nothing lies further that way, the
+-- portrait's only real sibling is the tree it brackets, so fall back to the tree
+-- window itself; failing that, stay put.
+local function win_move(dir)
+  local start = api.nvim_get_current_win()
+  vim.cmd('wincmd ' .. dir)
+  while is_portrait(api.nvim_get_current_win()) do
+    local before = api.nvim_get_current_win()
+    vim.cmd('wincmd ' .. dir)
+    if api.nvim_get_current_win() == before then
+      -- Can't advance past the head this way; land on the tree it sandwiches.
+      local tree = require('baseline.portrait').tree_win()
+      api.nvim_set_current_win(tree or start)
+      return
+    end
+  end
+end
+
+for _, dir in ipairs({ 'h', 'j', 'k', 'l' }) do
+  local move = function()
+    win_move(dir)
+  end
+  -- Terminal mode is covered directly: win_move drives the jump with `:wincmd`
+  -- (an Ex command, which runs fine from terminal-insert -- unlike the keystroke
+  -- <C-w>k), and switching away from a terminal leaves terminal-insert on its own.
+  keymap.set({ 'n', 'v', 't' }, '<C-' .. dir .. '>', move)
+end
 
 -- Esc leaves terminal-insert for normal mode instantly. NOTE: this shadows Esc
 -- inside terminal buffers (including the Claude pane and shells), so Esc no longer

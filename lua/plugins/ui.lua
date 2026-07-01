@@ -185,10 +185,22 @@ return {
       -- Rebuild the heart fill (see heart_fill / recompute_hearts above) out of
       -- the render path. vim.schedule defers to a normal, post-redraw context so
       -- the nvim_eval_statusline measurement is never re-entrant -- the thing that
-      -- made the bottom line flash. These events cover everything that changes a
-      -- section's width: terminal/window resizes, mode switches (the 'a' block
-      -- grows for V-BLOCK etc.), diagnostics, and buffer/git changes that move the
-      -- right-hand sections. A pending flag coalesces bursts into one rebuild.
+      -- made the bottom line flash. A pending flag coalesces bursts into one
+      -- rebuild, and recompute_hearts only redrawstatus when the count actually
+      -- changes, so over-firing these events is cheap.
+      --
+      -- The fill "not reaching the end" was staleness: a section changed width
+      -- but nothing here recomputed, so the cached heart count stayed sized for
+      -- the old layout. The list must cover EVERY section that can change width:
+      --   mode (a)              -> ModeChanged
+      --   diff hunk counts (b)  -> TextChanged/I as you edit, User Gitsigns* once
+      --                            gitsigns finishes its async recount, DiffChanged
+      --   diagnostics (b)       -> DiagnosticChanged
+      --   filetype/encoding (y) -> FileType (set after BufWinEnter), BufEnter
+      --   branch (z)            -> User Gitsigns* / BufEnter after a checkout
+      --   window/terminal size  -> VimResized, WinResized, Win*/Tab*/BufWinEnter
+      -- CursorHold is the idle backstop that repairs anything the above missed
+      -- once the user pauses.
       local pending = false
       local function schedule_hearts()
         if pending then
@@ -200,11 +212,22 @@ return {
           recompute_hearts()
         end)
       end
+      local grp = vim.api.nvim_create_augroup('HeartStatusFill', { clear = true })
       vim.api.nvim_create_autocmd({
         'VimResized', 'WinResized', 'WinNew', 'WinClosed', 'WinEnter',
-        'ModeChanged', 'DiagnosticChanged', 'BufWinEnter', 'TabEnter', 'VimEnter',
+        'ModeChanged', 'DiagnosticChanged', 'BufWinEnter', 'BufEnter',
+        'TabEnter', 'VimEnter', 'FileType', 'DiffUpdated',
+        'TextChanged', 'TextChangedI', 'CursorHold', 'CursorHoldI',
       }, {
-        group = vim.api.nvim_create_augroup('HeartStatusFill', { clear = true }),
+        group = grp,
+        callback = schedule_hearts,
+      })
+      -- gitsigns updates its diff/branch status asynchronously (after a debounce),
+      -- so TextChanged fires before the counts settle; this catches the settled
+      -- width. Pattern-guarded to gitsigns' own User events only.
+      vim.api.nvim_create_autocmd('User', {
+        group = grp,
+        pattern = { 'GitSignsUpdate', 'GitSignsChanged', 'FugitiveChanged' },
         callback = schedule_hearts,
       })
       schedule_hearts()
@@ -279,7 +302,16 @@ return {
   -- Cmdline UI, messages and notifications
   {
     'folke/noice.nvim',
-    dependencies = { 'MunifTanjim/nui.nvim', 'rcarriga/nvim-notify' },
+    dependencies = {
+      'MunifTanjim/nui.nvim',
+      {
+        'rcarriga/nvim-notify',
+        -- Normal has a transparent bg, so nvim-notify can't derive a
+        -- background color for NotifyBackground and warns on startup.
+        -- Give it an explicit fallback to silence the warning.
+        opts = { background_colour = '#000000' },
+      },
+    },
     opts = {
       lsp = {
         override = {

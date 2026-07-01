@@ -87,6 +87,7 @@ local state = {
   active = false, -- attached and running
   ready = false, -- a kitty graphics terminal was detected
   transmitted = false, -- the sheet has been sent to the terminal
+  images = {}, -- generic transmitted image-id set (M.kitty_transmit_image), for reuse by baseline.seps
   cell = nil, -- {w, h} source pixels per pose, read from the sheet's dimensions
   idle_timer = nil, -- one-shot: fires config.idle_return ms after the last mouse move
 }
@@ -251,32 +252,29 @@ end
 
 local KITTY_CHUNK = 4096 -- raw base64 bytes per transmit chunk (matches image.nvim)
 
--- Transmit the sheet to the terminal exactly once and record the per-pose cell size.
--- Size-independent (the terminal scales at display time), so this never repeats on
--- resize. Over SSH we send the file bytes (direct); locally we hand over the path.
+-- Send a PNG to the terminal under `image_id` exactly once and return ok. Size-
+-- independent (the terminal scales at display time), so this never repeats on resize.
+-- Over SSH we ship the file bytes (direct); locally we hand over the path (file).
 --
 -- We build the chunked transmit by hand instead of calling image.nvim's
 -- write_graphics because that helper does uv.sleep(1) BETWEEN every 4 KB chunk,
 -- which for a multi-megabyte sheet would freeze the UI for ~a second. The kitty
 -- protocol forbids interleaving other graphics commands mid-transmit, so the chunks
 -- stay consecutive -- we just drop the artificial per-chunk sleeps.
-local function transmit_sheet()
-  if state.transmitted then
-    return true
-  end
+--
+-- NB: do NOT paint anything (splash repaint, redraw, etc.) between the chunks below.
+-- The chunks stream to the terminal fd via the kitty libuv tty handle, and a Neovim
+-- UI flush writes to that SAME fd through a different, unsynchronised path -- forcing
+-- one mid-loop splices Neovim's bytes into the middle of the in-flight PNG, so it
+-- fails to decode and the image vanishes (intermittently, since it's timing-
+-- dependent). A previous progress hook here did exactly that; keep this a pure write.
+local function kitty_transmit(image_id, path)
   if not kitty_load() then
     return false
   end
-  local path = M.config.sheet
   if vim.fn.filereadable(path) == 0 then
     return false
   end
-  local sw, sh = png_size(path)
-  if not sw or not sh then
-    return false
-  end
-  state.cell = { math.floor(sw / M.config.yaw_steps), math.floor(sh / M.config.pitch_steps) }
-
   local c = kitty.codes.control
   -- Over SSH the terminal can't read our filesystem, so we ship the PNG bytes
   -- (direct); locally we hand it the path and let it read the file itself.
@@ -295,14 +293,6 @@ local function transmit_sheet()
   -- kitty wants URL-safe base64 (image.nvim maps '-' -> '/' for the same reason).
   payload = vim.base64.encode(payload):gsub('%-', '/')
   local tty = kitty.ssh and kitty.tty or nil
-  -- NB: do NOT paint anything (splash repaint, redraw, etc.) between the chunks
-  -- below. The chunks stream to the terminal fd via the kitty libuv tty handle,
-  -- and a Neovim UI flush writes to that SAME fd through a different, unsynchronised
-  -- path -- forcing one mid-loop splices Neovim's bytes into the middle of the
-  -- in-flight PNG transmission, so the sheet fails to decode and the heads vanish
-  -- (intermittently, since it's timing-dependent). A previous progress-reporting
-  -- hook here did exactly that and is why portraits became flaky; keep this loop
-  -- a pure, uninterrupted write.
   local first = true
   for i = 1, #payload, KITTY_CHUNK do
     local piece = payload:sub(i, i + KITTY_CHUNK - 1):gsub('%s', '')
@@ -313,7 +303,7 @@ local function transmit_sheet()
       control = string.format(
         'a=%s,i=%d,f=%d,t=%s,q=2,m=%d',
         c.action.transmit,
-        M.config.image_id,
+        image_id,
         c.transmit_format.png,
         medium,
         more
@@ -324,14 +314,49 @@ local function transmit_sheet()
     end
     pcall(kitty.helpers.write, '\27_G' .. control .. ';' .. piece .. '\27\\', tty, true)
   end
+  return true
+end
+
+-- Transmit the portrait sheet once and record the per-pose cell size from its PNG
+-- dimensions (so we can crop a cell without spawning magick). The byte transmit is
+-- kitty_transmit; here we just add the sheet-specific bookkeeping.
+local function transmit_sheet()
+  if state.transmitted then
+    return true
+  end
+  local path = M.config.sheet
+  local sw, sh = png_size(path)
+  if not sw or not sh then
+    return false
+  end
+  state.cell = { math.floor(sw / M.config.yaw_steps), math.floor(sh / M.config.pitch_steps) }
+  if not kitty_transmit(M.config.image_id, path) then
+    return false
+  end
   state.transmitted = true
   return true
 end
 
--- Show pose (yi,pi) on `pane`: crop its cell out of the sheet (source rect x,y,w,h,
--- in sheet pixels) and scale it into the pane's cell box (c=cols, r=rows). Re-placing
--- THIS PANE's placement id (over the shared image id) REPLACES only this pane's head
--- in place -- one escape, no transmit, no delete, and the other pane is untouched.
+-- Transmit an ARBITRARY image once under `image_id` (reused by baseline.seps for the
+-- 3D separators). Deduped per id, gated on a confirmed kitty terminal.
+function M.kitty_transmit_image(image_id, path)
+  if not state.ready then
+    return false
+  end
+  if state.images[image_id] then
+    return true
+  end
+  if kitty_transmit(image_id, path) then
+    state.images[image_id] = true
+    return true
+  end
+  return false
+end
+
+-- Place a crop of `image_id` into a screen-cell box, replacing any prior placement
+-- with `placement_id` in place. src = {x,y,w,h} source pixels (nil = the whole
+-- image); dst = {col,row,cols,rows} in 0-based editor cells; zindex follows kitty's
+-- convention (negative => below text, >= 0 => above it).
 --
 -- We build the framed display escape by hand instead of calling image.nvim's
 -- write_graphics_at because that helper parks the cursor with CSI s / CSI u
@@ -339,41 +364,81 @@ end
 -- terminals (notably WezTerm on Windows): the cursor is left sitting over the pane,
 -- so the kitty placement re-anchors a row lower on every move and the head WALKS
 -- OFF THE BOTTOM. The unambiguous DEC pair ESC 7 / ESC 8 (DECSC/DECRC) restores
--- correctly everywhere, so the head stays pinned. Still one synchronized (DEC 2026)
--- frame, so the swap is gapless.
-local function kitty_show(pane, yi, pi)
-  local g = pane.sgeo or square_geometry(pane)
-  local cw, ch = state.cell[1], state.cell[2]
+-- correctly everywhere. Still one synchronized (DEC 2026) frame, so the swap is gapless.
+function M.kitty_place(image_id, placement_id, src, dst, zindex)
+  if not state.ready or not kitty_load() then
+    return
+  end
   local c = kitty.codes.control
   -- screen cursor is 1-based; with showtabline=0 the editor grid starts at 1,1.
-  local x, y = g.col + 1, g.row + 1
-  -- Inside tmux the graphics cursor is pane-relative; shift to absolute screen
-  -- cells exactly as write_graphics_at did.
+  local x, y = dst.col + 1, dst.row + 1
+  -- Inside tmux the graphics cursor is pane-relative; shift to absolute screen cells.
   if kitty.utils and kitty.utils.tmux and kitty.utils.tmux.is_tmux then
     local p = kitty.utils.tmux.get_pane_position()
     x, y = x + p.left, y + p.top
   end
-  local control = table.concat({
+  local keys = {
     c.keys.action .. '=' .. c.action.display,
-    c.keys.image_id .. '=' .. M.config.image_id,
-    c.keys.placement_id .. '=' .. pane.placement_id, -- per-pane placement over the shared image
-    c.keys.display_x .. '=' .. (yi * cw), -- source crop: left edge of this pose's cell
-    c.keys.display_y .. '=' .. (pi * ch), -- source crop: top edge of this pose's cell
-    c.keys.display_width .. '=' .. cw, -- source crop: one cell wide
-    c.keys.display_height .. '=' .. ch, -- source crop: one cell tall
-    c.keys.display_columns .. '=' .. g.width, -- scale the crop into the pane's cell box
-    c.keys.display_rows .. '=' .. g.height,
-    c.keys.display_zindex .. '=' .. M.config.zindex,
-    c.keys.display_cursor_policy .. '=' .. c.display_cursor_policy.do_not_move,
-    c.keys.quiet .. '=2',
-  }, ',')
+    c.keys.image_id .. '=' .. image_id,
+    c.keys.placement_id .. '=' .. placement_id,
+  }
+  if src then
+    keys[#keys + 1] = c.keys.display_x .. '=' .. src.x -- source crop: left edge
+    keys[#keys + 1] = c.keys.display_y .. '=' .. src.y -- source crop: top edge
+    keys[#keys + 1] = c.keys.display_width .. '=' .. src.w -- source crop width
+    keys[#keys + 1] = c.keys.display_height .. '=' .. src.h -- source crop height
+  end
+  keys[#keys + 1] = c.keys.display_columns .. '=' .. dst.cols -- scale into this cell box
+  keys[#keys + 1] = c.keys.display_rows .. '=' .. dst.rows
+  keys[#keys + 1] = c.keys.display_zindex .. '=' .. (zindex or 0)
+  keys[#keys + 1] = c.keys.display_cursor_policy .. '=' .. c.display_cursor_policy.do_not_move
+  keys[#keys + 1] = c.keys.quiet .. '=2'
   local ESC = '\27'
   local seq = ESC .. '[?2026h' .. ESC .. '7' -- sync on, DEC save cursor
-    .. ESC .. '[' .. y .. ';' .. x .. 'H' -- park over the pane (absolute, 1-based)
-    .. ESC .. '_G' .. control .. ESC .. '\\' -- the display escape
+    .. ESC .. '[' .. y .. ';' .. x .. 'H' -- park over the box (absolute, 1-based)
+    .. ESC .. '_G' .. table.concat(keys, ',') .. ESC .. '\\' -- the display escape
     .. ESC .. '8' .. ESC .. '[?2026l' -- DEC restore cursor, sync off
-  local tty = kitty.ssh and kitty.tty or nil
-  pcall(kitty.helpers.write, seq, tty, true)
+  pcall(kitty.helpers.write, seq, kitty.ssh and kitty.tty or nil, true)
+end
+
+-- Delete a single placement (d=i keeps the image data resident; uppercase would free
+-- it), so baseline.seps can drop a separator segment that no longer exists after a
+-- relayout without re-transmitting the tube.
+function M.kitty_remove(image_id, placement_id)
+  if not (kitty and kitty.ok) then
+    return
+  end
+  local seq = '\27_Ga=d,d=i,i=' .. image_id .. ',p=' .. placement_id .. ',q=2\27\\'
+  pcall(kitty.helpers.write, seq, kitty.ssh and kitty.tty or nil, true)
+end
+
+function M.kitty_is_ready()
+  return state.ready
+end
+
+-- The file-tree window sandwiched between the two portrait heads, or nil if the
+-- portrait column was never built (e.g. the `nvim <file>` side-panel fallback).
+-- baseline.maps uses it as the fallback focus target when directional navigation
+-- would otherwise strand the cursor on a portrait pane.
+function M.tree_win()
+  return (state.tree and api.nvim_win_is_valid(state.tree)) and state.tree or nil
+end
+
+-- Show pose (yi,pi) on `pane`: crop its cell out of the sheet and scale it into the
+-- pane's box via the generic placement above. Re-placing THIS PANE's placement id
+-- (over the shared image id) REPLACES only this pane's head -- the other is untouched.
+-- The head sits BELOW text (zindex -1) and its pane is a blank scratch buffer, so it
+-- shows through.
+local function kitty_show(pane, yi, pi)
+  local g = pane.sgeo or square_geometry(pane)
+  local cw, ch = state.cell[1], state.cell[2]
+  M.kitty_place(
+    M.config.image_id,
+    pane.placement_id,
+    { x = yi * cw, y = pi * ch, w = cw, h = ch },
+    { col = g.col, row = g.row, cols = g.width, rows = g.height },
+    M.config.zindex
+  )
 end
 
 -- Free the sheet from the terminal (d=A frees image DATA, not just placements, so it
