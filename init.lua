@@ -6,9 +6,12 @@ require('baseline.commands')
 require('baseline.splash').setup()
 require('baseline.banners').setup()
 require('baseline.panetabs').setup()
+require('baseline.statusline').setup()
+require('baseline.winbar').setup()
 require('baseline.portrait').setup()
 require('baseline.layout').setup()
 require('baseline.splash_images').setup()
+require('baseline.scrollguard').setup()
 
 -- Bootstrap lazy.nvim
 local lazypath = vim.fn.stdpath('data') .. '/lazy/lazy.nvim'

@@ -1,22 +1,19 @@
--- Tree column = square "portrait" pane (top) / file tree (middle) / square
--- "portrait" pane (bottom).
+-- Tree column = square "portrait" pane (top) / file tree (bottom, grows to
+-- fill the rest of the column).
 --
 --   +-----------+
 --   |  PORTRAIT |   <- square pane: a 3D head that looks toward the mouse,
 --   |  (square) |      pinned to the TOP of the column
 --   +-----------+
---   | file tree |   <- nvim-tree (middle), grows to fill the space between
+--   | file tree |   <- nvim-tree, fills the remaining column height
+--   |           |
 --   |           |
 --   +-----------+
---   |  PORTRAIT |   <- square pane pinned to the BOTTOM of the column. RESPONSIVE:
---   |  (square) |      only present when the terminal WINDOW is >= config.min_bottom_height
---   +-----------+      pixels tall (CSI 14 t); on a shorter window it is removed and the
---                      tree reclaims its space, and it returns live if the window grows.
 --
--- Both heads track the mouse live: 'mousemoveevent' + a <MouseMove> map feed
--- getmousepos() into a direction PER PANE (each relative to its own centre),
--- which selects the nearest precomputed viewing angle ("pose") and shows that
--- pose over that pane.
+-- The head tracks the mouse live: 'mousemoveevent' + a <MouseMove> map feed
+-- getmousepos() into a direction relative to the pane's centre, which selects
+-- the nearest precomputed viewing angle ("pose") and shows that pose over the
+-- pane.
 --
 -- DESIGN -- one sheet, crop per frame. Poses are precomputed offline into a single
 -- sprite SHEET: a yaw_steps x pitch_steps grid of head renders packed into one PNG
@@ -25,13 +22,12 @@
 --
 --   1. TRANSMIT the sheet to the terminal ONCE, at attach (kitty graphics protocol,
 --      f=100 raw PNG). It's the only expensive step and it happens before the user
---      interacts, so there is no warm-up, no background pre-fetch, no caching. Both
---      panes share that one resident image.
---   2. On every mouse move, emit ONE display escape PER PANE that crops the cell for
---      the chosen pose out of the sheet (source rect x,y,w,h) and scales it into the
---      pane's cell box (c,r). Each pane owns a distinct PLACEMENT id over the same
---      image id, so re-placing it REPLACES that pane's head in place -- one escape,
---      no transmit, no delete, no flicker, and the two panes never clobber each other.
+--      interacts, so there is no warm-up, no background pre-fetch, no caching.
+--   2. On every mouse move, emit ONE display escape that crops the cell for the
+--      chosen pose out of the sheet (source rect x,y,w,h) and scales it into the
+--      pane's cell box (c,r). The pane owns a distinct PLACEMENT id over the
+--      image id, so re-placing it REPLACES the head in place -- one escape,
+--      no transmit, no delete, no flicker.
 --
 -- Because the sheet is transmitted once and the terminal rescales at display time,
 -- every pose is ready from the first frame and a resize is just a re-crop into the
@@ -70,40 +66,40 @@ M.config = {
   -- ease back to facing forward (the grid centre) instead of staying frozen at the
   -- last cursor pose. Reuses the same easer, so the swing back glides like any other.
   idle_return = 1500, -- ms
-  -- Rows the tree pane keeps when the ideal squares would crush it: on a wide
+  -- Rows the tree pane keeps when the ideal square would crush it: on a wide
   -- column width/2 (per square) can exceed the height available, so we cap the
-  -- squares and let them be wider-than-tall rather than starve the tree between them.
+  -- square and let it be wider-than-tall rather than starve the tree below it.
   min_tree = 6,
-  -- The bottom head is RESPONSIVE: it only shows when the terminal WINDOW is at least
-  -- this tall in PIXELS (queried live via CSI 14 t). On a shorter screen the bottom
-  -- head is removed and the tree reclaims its space; growing the window back past this
-  -- adds the head again on the fly. 1080 => hide it on sub-1080p-tall windows.
-  min_bottom_height = 1080,
 }
 
 -- engine state -------------------------------------------------------------
 --
--- `state` holds what the two panes SHARE: the tree window between them, kitty
+-- `state` holds the shared engine bits: the tree window below the square, kitty
 -- readiness, the single transmitted sheet and its per-pose cell size, plus the list
--- of panes. Everything that differs per head lives on the pane object (see new_pane).
+-- of panes (just the top square). Everything that differs per head lives on the
+-- pane object (see new_pane).
 
 local state = {
-  tree = nil, -- the file-tree window the squares sandwich
-  panes = {}, -- list of pane objects (top + bottom), each an independent head
+  tree = nil, -- the file-tree window below the square
+  panes = {}, -- list of pane objects (just the top square), each an independent head
   active = false, -- attached and running
   ready = false, -- a kitty graphics terminal was detected
   transmitted = false, -- the sheet has been sent to the terminal
   cell = nil, -- {w, h} source pixels per pose, read from the sheet's dimensions
   idle_timer = nil, -- one-shot: fires config.idle_return ms after the last mouse move
-  win_px_h = nil, -- last terminal WINDOW height in pixels (CSI 14 t report), drives the responsive bottom head
-  px_known = false, -- whether the terminal has actually reported its pixel size yet (vs. our fallback guess)
-  bottom = nil, -- the bottom pane object while it is shown; nil when hidden on a short window
+  -- Gates the actual paint (not the transmit/sizing) so the heads never appear
+  -- mid-startup: kitty images are composited by the TERMINAL, not Neovim, so they
+  -- ignore the splash float's stacking order and would bleed through its blank
+  -- (transparent) cells if painted while it's still up. baseline.layout closes this
+  -- gate with M.hold_reveal() before the splash is shown; the 'SplashClosed' autocmd
+  -- below reopens it once the overlay is gone, so every pane appears together.
+  reveal = true,
 }
 
 local uv = vim.uv or vim.loop
 
 -- A pane: one square window showing one head, with its own placement id, easer and
--- geometry cache so the two heads animate and re-crop fully independently.
+-- geometry cache so each head animates and re-crops independently.
 local function new_pane(square, placement_id)
   return {
     square = square, -- the window the head is drawn over
@@ -442,7 +438,9 @@ local function kitty_clear()
 end
 
 -- The render seam: ensure the sheet is resident, then show the pose on `pane`.
--- Silently does nothing until a kitty terminal is confirmed (state.ready).
+-- Silently does nothing until a kitty terminal is confirmed (state.ready), or
+-- while the reveal gate is held (pane.pose still tracks the target so the pane
+-- shows the right pose the instant the gate reopens).
 function M.render_pose(pane, yi, pi)
   if not state.ready then
     return
@@ -450,7 +448,33 @@ function M.render_pose(pane, yi, pi)
   if not state.transmitted and not transmit_sheet() then
     return -- sheet missing / no kitty -> leave the panes blank
   end
+  if not state.reveal then
+    return
+  end
   kitty_show(pane, yi, pi)
+end
+
+-- Close the reveal gate: the sheet still transmits and panes still size/track the
+-- cursor, but nothing is actually painted until M.reveal_now() (or a 'SplashClosed'
+-- event) reopens it. Call before the splash overlay goes up so no head can slip
+-- through its blank cells while startup is still juggling windows.
+function M.hold_reveal()
+  state.reveal = false
+end
+
+-- Reopen the reveal gate and paint every pane's current pose at once, so the whole
+-- column appears in a single frame instead of trickling in as each head happens to
+-- repaint.
+function M.reveal_now()
+  state.reveal = true
+  if not (state.ready and state.transmitted) then
+    return -- sheet never landed (no kitty / still in flight) -- nothing to paint yet
+  end
+  for _, pane in ipairs(state.panes) do
+    if pane.pose then
+      kitty_show(pane, pane.pose[1], pane.pose[2])
+    end
+  end
 end
 
 -- easing -------------------------------------------------------------------
@@ -603,18 +627,16 @@ local function refresh_square(pane)
   redraw(pane)
 end
 
--- Force the portrait windows back to true visual squares (rows ~= cols / aspect) by
--- handing the tree the leftover height. This necessarily OVERRIDES whatever heights the
--- squares currently have, so it must NOT run on a plain WinResized (a user drag) -- only
+-- Force the portrait window back to a true visual square (rows ~= cols / aspect) by
+-- handing the tree the leftover height. This necessarily OVERRIDES whatever height the
+-- square currently has, so it must NOT run on a plain WinResized (a user drag) -- only
 -- on events that reflow the whole layout anyway (terminal resize, window close, tab
 -- switch) and on the initial attach. It only ever resizes the tree + square panes (never
 -- a global `wincmd =`), so other columns keep the size the user gave them.
 --
--- Both squares sit in the SAME column as the tree (top square / tree / bottom square),
--- so they share a width; each square's natural height is width/aspect. We size each
--- square to that target and let the tree (between them) absorb the remainder. Because the
--- squares bracket the tree, setting their heights pushes the delta into the tree, which
--- pins one head to the top of the column and the other to the bottom.
+-- The square sits in the SAME column as the tree, sharing its width; the square's
+-- natural height is width/aspect. We size it to that target and let the tree below it
+-- absorb the remainder.
 local function enforce_column()
   if not (state.tree and api.nvim_win_is_valid(state.tree)) then
     return
@@ -735,10 +757,6 @@ end
 
 -- wiring -------------------------------------------------------------------
 
--- Forward decls: the responsive bottom-portrait helpers are defined after add_pane
--- (they need it), but the autocmds wired up below reference them.
-local query_win_pixels, apply_bottom_visibility
-
 local function setup_autocmds()
   local group = api.nvim_create_augroup('Portrait', { clear = true })
   -- Re-square only on events that reflow the whole layout anyway. WinResized is
@@ -748,34 +766,7 @@ local function setup_autocmds()
   api.nvim_create_autocmd({ 'VimResized', 'WinClosed', 'TabEnter' }, {
     group = group,
     callback = function()
-      vim.schedule(function()
-        enforce_column()
-        -- A terminal resize can cross the bottom-head height threshold: re-ask the
-        -- terminal for its pixel size. The reply lands on TermResponse below, which
-        -- re-applies the bottom head's visibility.
-        query_win_pixels()
-      end)
-    end,
-  })
-  -- The window's pixel size, reported by the terminal in response to query_win_pixels'
-  -- CSI 14 t (format: ESC [ 4 ; height ; width t). We cache the height and add/remove
-  -- the bottom head accordingly, so the layout responds live to a resize.
-  api.nvim_create_autocmd('TermResponse', {
-    group = group,
-    callback = function(ev)
-      local seq = (type(ev.data) == 'table' and ev.data.sequence)
-        or (type(ev.data) == 'string' and ev.data)
-        or vim.v.termresponse
-        or ''
-      if type(seq) ~= 'string' then
-        return
-      end
-      local h = seq:match('\27%[4;(%d+);%d+t')
-      if h then
-        state.win_px_h = tonumber(h)
-        state.px_known = true
-        apply_bottom_visibility()
-      end
+      vim.schedule(enforce_column)
     end,
   })
   -- A user dragging a border (WinResized) only re-crops the heads into their new boxes;
@@ -790,6 +781,18 @@ local function setup_autocmds()
       end)
     end,
   })
+  -- Reopen the reveal gate once the startup splash overlay is gone, painting every
+  -- pane's already-tracked pose in one frame. `once` because a fresh 'Portrait'
+  -- group (and gate) is created per attach, so a stale listener can't fire twice.
+  api.nvim_create_autocmd('User', {
+    group = group,
+    pattern = 'SplashClosed',
+    once = true,
+    callback = function()
+      M.reveal_now()
+    end,
+  })
+
   -- Live mouse tracking. mousemoveevent makes the UI deliver <MouseMove>; the map
   -- is cheap (compute pose, compare, maybe one escape per pane) so firing on every
   -- motion is fine. Mapped across modes since the event arrives in whatever mode is active.
@@ -806,92 +809,11 @@ end
 local function add_pane(square)
   vim.wo[square].winbar = '' -- keep the portrait pane clean (no heart banner)
   vim.wo[square].winfixheight = true -- 'equalalways' must not resize the square
-  -- Distinct placement id per pane over the shared image id, so the two heads can be
+  -- Distinct placement id per pane over the shared image id, so multiple heads could be
   -- displayed (and replaced) independently without clobbering each other.
   local pane = new_pane(square, M.config.image_id + #state.panes)
   state.panes[#state.panes + 1] = pane
   return pane
-end
-
--- responsive bottom head ----------------------------------------------------
---
--- The bottom head only earns its space on a tall enough window. We learn the window's
--- PIXEL height by asking the terminal (CSI 14 t), not by guessing from cells -- rows say
--- nothing about the physical height a head needs. When the reported height crosses
--- config.min_bottom_height we add or remove the bottom pane in place, so growing or
--- shrinking the window reflows the tree column live.
-
--- Ask the terminal for its window size in pixels; the reply arrives asynchronously on
--- TermResponse (parsed in setup_autocmds), so we never block on it. Same io.stdout path
--- probe_kitty uses, which reaches the real terminal even over SSH.
-query_win_pixels = function()
-  pcall(function()
-    io.stdout:write('\27[14t')
-    io.stdout:flush()
-  end)
-end
-
--- Split a fresh bottom square off the BOTTOM of the tree, wire it as a head, and let
--- enforce_column re-square the column (the tree gives up the height). Idempotent: does
--- nothing if the bottom head already exists or the column was never built.
-local function add_bottom_pane()
-  if state.bottom then
-    return
-  end
-  if not (state.tree and api.nvim_win_is_valid(state.tree)) then
-    return
-  end
-  local cur = api.nvim_get_current_win()
-  api.nvim_set_current_win(state.tree)
-  vim.cmd('belowright split') -- new window drops in below the tree -> the bottom square
-  local square = api.nvim_get_current_win()
-  local sbuf = scratch()
-  api.nvim_win_set_buf(square, sbuf)
-  vim.bo[sbuf].filetype = 'portrait'
-  blank_win(square)
-  state.bottom = add_pane(square)
-  if api.nvim_win_is_valid(cur) then
-    api.nvim_set_current_win(cur) -- adding the head must not steal focus
-  end
-  enforce_column() -- size the new square and hand the tree back the remainder
-end
-
--- Tear the bottom head back out: drop its placement from the terminal, unregister the
--- pane, close its window, and re-square the column so the tree reclaims the space.
-local function remove_bottom_pane()
-  local pane = state.bottom
-  if not pane then
-    return
-  end
-  state.bottom = nil
-  for i, p in ipairs(state.panes) do
-    if p == pane then
-      table.remove(state.panes, i)
-      break
-    end
-  end
-  stop_ease(pane)
-  M.kitty_remove(M.config.image_id, pane.placement_id) -- drop this head from the terminal
-  if pane.square and api.nvim_win_is_valid(pane.square) then
-    pcall(api.nvim_win_close, pane.square, true)
-  end
-  enforce_column()
-end
-
--- Reconcile the bottom head with the last reported window height: show it at/above the
--- threshold, hide it below. A no-op until we actually know the height (state.px_known),
--- so we never flap the layout on a stale/guessed value. Idempotent, so it is safe to
--- call from every resize and every terminal report.
-apply_bottom_visibility = function()
-  if not (state.active and state.win_px_h) then
-    return
-  end
-  local want = state.win_px_h >= M.config.min_bottom_height
-  if want and not state.bottom then
-    add_bottom_pane()
-  elseif not want and state.bottom then
-    remove_bottom_pane()
-  end
 end
 
 -- Detect kitty once, then start driving every registered pane: size the column and
@@ -905,17 +827,6 @@ local function attach_column()
       state.ready = ok
       state.active = true
       enforce_column() -- sizes the squares and shows the first pose on each (if ready)
-      -- Learn the window's pixel height so the bottom head can decide whether to show;
-      -- the reply lands on TermResponse and calls apply_bottom_visibility. If the
-      -- terminal never reports (no CSI 14 t support), fall back to showing the bottom
-      -- head after a short grace period so we don't strand the column headless.
-      query_win_pixels()
-      vim.defer_fn(function()
-        if state.active and not state.px_known then
-          state.win_px_h = M.config.min_bottom_height
-          apply_bottom_visibility()
-        end
-      end, 400)
       if not ok then
         vim.notify('[portrait] no kitty graphics protocol detected; panes left blank', vim.log.levels.WARN)
       end
@@ -927,10 +838,8 @@ local function attach_column()
 end
 
 -- Build the tree column inside `center` (assumed empty/current): a square portrait
--- pinned to the TOP, the file tree BELOW it, then start the engine. The BOTTOM head is
--- NOT built here -- it is added responsively (apply_bottom_visibility) once the terminal
--- reports a window tall enough for it, and removed again if the window shrinks. We split
--- the top square off `center` with aboveleft, leaving `center` as the tree window.
+-- pinned to the TOP, the file tree BELOW it, then start the engine. We split the top
+-- square off `center` with aboveleft, leaving `center` as the tree window.
 function M.setup_center(center)
   -- Top square: split above `center`, focus moves to the new (upper) window. `center`
   -- stays put below it as the tree window.
@@ -940,8 +849,11 @@ function M.setup_center(center)
 
   local sbuf = scratch()
   api.nvim_win_set_buf(top, sbuf)
-  -- Tag as 'portrait' so lualine skips its winbar (disabled_filetypes in plugins/ui.lua)
-  -- -- otherwise the heart-banner winbar reads as a separator line above the portrait.
+  -- Tag as 'portrait' for baseline.banners (skips this pane when drawing the
+  -- left border, since a float over a kitty image drops it) and baseline.maps
+  -- (directional nav around the tree column). add_pane() below blanks this
+  -- pane's own winbar directly -- otherwise the heart-banner winbar would read
+  -- as a separator line above the portrait.
   vim.bo[sbuf].filetype = 'portrait'
   blank_win(top) -- the head is drawn over this pane, so keep it visually empty
   add_pane(top)

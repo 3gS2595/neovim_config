@@ -13,13 +13,19 @@
   - TEDDY BEAR SHAPE FRAME <3
   - ADD SLIGHT FRAME TILT
   - EXCHANGE HORSE FOR HUNTERS PONY < 3 < 3
-- bottom avatar grins lagrer the longer you dont use mouse
-- top avatar;s eyes get happier/angrier the longer you dont use mouse
-- if you use mouse both/standard is unhappy angry 
+  - bottom avatar grins lagrer the longer you dont use mouse
+  - top avatar;s eyes get happier/angrier the longer you dont use mouse
+  - if you use mouse both/standard is unhappy angry 
 
 - webui to customize fastfetch
   - multi layers your can order
   - style customization sixel/braille etc
   - integration with r side floral info border
   - info customization 
-  - 
+
+--- BUGS / CORE FIX IDEAS
+ - fix tabs display when many tabs
+ - ability to toggle live code view
+ - default claude and terminal should not show up as tabs on the other.
+   - find a way to close this tab without :q
+ - handle the case when tabs or panes get mangled and you need to reorganize them and or open missing or close combine extra

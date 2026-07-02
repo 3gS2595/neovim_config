@@ -10,7 +10,7 @@ return {
         ensure_installed = {
           'bash', 'css', 'fish', 'html', 'javascript', 'json', 'lua',
           'markdown', 'markdown_inline', 'php', 'regex', 'ruby',
-          'swift', 'toml', 'tsx', 'typescript', 'vue', 'yaml',
+          'toml', 'tsx', 'typescript', 'vue', 'yaml',
         },
         highlight = { enable = true },
       })

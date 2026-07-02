@@ -3,8 +3,9 @@
 --   Row 1 (winbar):  ╭──────╮╭────╮   <celestial pattern fills the rest>
 --   Row 2 (overlay): │ a.lua ×││ b ×│  <celestial pattern fills the rest>
 --
--- Row 1 is the winbar (lualine renders each window's winbar via nvim_win_call,
--- so the window being drawn is the current window): the top outline of each
+-- Row 1 is the winbar (baseline.winbar sets a single global 'winbar' whose
+-- %{%...%} expression Neovim evaluates per-window, with vim.g.statusline_winid
+-- naming the window being drawn -- see M.winbar below): the top outline of each
 -- tab, plus the heart/celestial separator pattern filling the leftover width.
 --
 -- Row 2 is a 1-row floating overlay pinned at the pane's first text row (same
@@ -202,18 +203,21 @@ local function build(win, role, width)
   return table.concat(top) .. '%#WinBar#', table.concat(title), thl, clicks
 end
 
--- Winbar component lualine calls: top-outline row for tagged panes, else banner.
-function M.winbar()
-  local win = vim.api.nvim_get_current_win()
+-- Winbar component baseline.winbar calls: top-outline row for tagged panes,
+-- else the heart banner. `win` defaults to the current window; baseline.winbar
+-- passes vim.g.statusline_winid explicitly since during winbar evaluation
+-- that's the window being drawn, not necessarily the focused one.
+function M.winbar(win)
+  win = win or vim.api.nvim_get_current_win()
   local role = role_of(win)
   if role then
     return (build(win, role, vim.api.nvim_win_get_width(win)))
   end
-  return require('baseline.banners').winbar()
+  return require('baseline.banners').winbar(win)
 end
 
-function M.is_tabbed()
-  return role_of(vim.api.nvim_get_current_win()) ~= nil
+function M.is_tabbed(win)
+  return role_of(win or vim.api.nvim_get_current_win()) ~= nil
 end
 
 -- Closing -------------------------------------------------------------------
@@ -399,7 +403,7 @@ local function update_header(cwin, role)
   -- current buffer: switching the active tab moves the active-tab highlight even
   -- though the tab *text* (title) is unchanged, so title alone would skip the
   -- repaint and leave the bottom row's active colour stale. (Row 1's winbar
-  -- carries inline highlights, so lualine repaints it every redraw regardless.)
+  -- carries inline highlights, so Neovim repaints it every redraw regardless.)
   local sig = table.concat({ row, col, width, vim.api.nvim_win_get_buf(cwin), title }, '|')
   local h = ov.headers[cwin]
   if h and vim.api.nvim_win_is_valid(h.win) then
@@ -441,17 +445,79 @@ local function update_header(cwin, role)
   end
 end
 
+-- Row 2 hides real content ---------------------------------------------------
+--
+-- update_header above draws the title float 1 row BELOW the winbar
+-- (row_offset) -- directly over the pane's actual first VISIBLE buffer line.
+-- Neovim's real 'winbar' reserves its own row automatically; there is no
+-- native way to reserve a SECOND row for this float without giving every
+-- tabbed pane a real sibling window, which would ripple through this layout's
+-- window-nav, resize and separator code (all of which assume one window ==
+-- one pane). Instead we fake the reservation with a virtual line: an extmark
+-- anchored at whatever buffer line is CURRENTLY the window's topline, that
+-- renders `row_offset` blank 'virt_lines_above' rows -- pushing the real
+-- content down by exactly that many screen rows so the float always lands on
+-- blank space, never on text. Recomputed on every redraw (see the
+-- 'WinScrolled' trigger in M.setup) so it tracks scrolling, not just the
+-- buffer's literal first line.
+--
+-- Known limit: virtual lines are a BUFFER decoration, not a per-window one --
+-- if the SAME buffer is open in two tabbed panes at different scroll
+-- positions, either pane's pad can bleed into the other wherever ITS topline
+-- happens to scroll past it. Rare in this layout (each pane normally shows
+-- its own distinct buffers via baseline.panetabs' own per-role buffer lists),
+-- so left as a known quirk rather than solved with per-window buffers.
+local pad_ns = vim.api.nvim_create_namespace('panetabs_pad')
+local pads = {} -- win -> {buf, row, id}
+
+local function clear_pad(win)
+  local p = pads[win]
+  if p then
+    if vim.api.nvim_buf_is_valid(p.buf) then
+      pcall(vim.api.nvim_buf_del_extmark, p.buf, pad_ns, p.id)
+    end
+    pads[win] = nil
+  end
+end
+
+local function update_pad(win)
+  local buf = vim.api.nvim_win_get_buf(win)
+  local row = vim.fn.line('w0', win) - 1 -- 0-based index of the current topline
+  local p = pads[win]
+  if p and p.buf == buf and p.row == row then
+    return -- topline hasn't moved: nothing to reposition
+  end
+  clear_pad(win)
+  local lines = {}
+  for i = 1, M.config.row_offset do
+    lines[i] = { { ' ', 'Normal' } }
+  end
+  local ok, id = pcall(vim.api.nvim_buf_set_extmark, buf, pad_ns, row, 0, {
+    virt_lines = lines,
+    virt_lines_above = true,
+  })
+  if ok then
+    pads[win] = { buf = buf, row = row, id = id }
+  end
+end
+
 local function redraw()
   local seen = {}
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_config(win).relative == '' and role_of(win) then
       seen[win] = true
       update_header(win, role_of(win))
+      update_pad(win)
     end
   end
   for cwin in pairs(ov.headers) do
     if not seen[cwin] then
       destroy_header(cwin)
+    end
+  end
+  for cwin in pairs(pads) do
+    if not seen[cwin] then
+      clear_pad(cwin)
     end
   end
 end
@@ -504,6 +570,7 @@ function M.setup()
     'BufWinEnter',
     'BufEnter',
     'WinResized',
+    'WinScrolled', -- topline moves (scrolling) without touching size/buffer -- update_pad needs this
     'VimResized',
     'WinNew',
     'WinClosed',
@@ -511,7 +578,9 @@ function M.setup()
     'BufAdd',
     'BufDelete',
     'TermOpen',
-    'BufModifiedSet',
+    'TextChanged',
+    'TextChangedI',
+    'BufWritePost',
   }, { group = group, callback = schedule })
 
   -- One global click router for the tab floats. <expr> so we can fall through
@@ -519,8 +588,25 @@ function M.setup()
   -- buffer-local maps (nvim-tree etc.) still take precedence over this. Mapped
   -- in terminal-mode too so the terminal pane's tabs are clickable while typing
   -- (the click drops the terminal to normal mode; press i/a to resume).
+  --
+  -- A click that falls through and lands in the Claude pane specifically (found
+  -- via scrollguard's window-tag, not just any terminal) auto-enters terminal-mode,
+  -- so clicking Claude always drops you straight into typing rather than normal
+  -- mode. Deferred via vim.schedule: the native '<LeftMouse>' return still has to
+  -- move focus/cursor there first, and textlock blocks startinsert inline anyway.
   vim.keymap.set({ 'n', 't' }, '<LeftMouse>', function()
-    return M._click() and '' or '<LeftMouse>'
+    if M._click() then
+      return ''
+    end
+    local mp = vim.fn.getmousepos()
+    if mp.winid == require('baseline.scrollguard').claude_win() then
+      vim.schedule(function()
+        if vim.api.nvim_win_is_valid(mp.winid) and vim.api.nvim_get_current_win() == mp.winid then
+          vim.cmd('startinsert')
+        end
+      end)
+    end
+    return '<LeftMouse>'
   end, { expr = true, desc = 'Pane tab click' })
 
   vim.keymap.set('n', '<leader>bd', function()

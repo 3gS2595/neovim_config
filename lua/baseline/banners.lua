@@ -6,8 +6,8 @@
 --     (static)         (repeats to fill)      (centerpiece)   (repeats to fill)   (static)
 --
 --   * Horizontal dividers (pane tops) -> the parts laid left-to-right, filling
---     the window width, rendered on the lualine winbar (wiring in
---     lua/plugins/ui.lua, which calls M.winbar()).
+--     the window width, rendered on the native winbar (baseline.winbar calls
+--     M.winbar() via baseline.panetabs' own fallback).
 --   * Vertical separators (side-by-side panes) -> the SAME four parts stacked
 --     top-to-bottom. 'fillchars' only paints one cell, so there is no native
 --     way to do this; instead we draw a 1-column floating window over each
@@ -76,9 +76,12 @@ function M.build(width)
     .. c.h_end
 end
 
--- lualine winbar component: fill the current window, leaving `reserve` columns.
-function M.winbar()
-  local w = api.nvim_win_get_width(0) - M.config.reserve
+-- Winbar fallback for untagged panes (baseline.panetabs.winbar): fill `win`
+-- (current window if omitted), leaving `reserve` columns for that caller's own
+-- leading section (diagnostics/navic).
+function M.winbar(win)
+  win = win or 0
+  local w = api.nvim_win_get_width(win) - M.config.reserve
   return M.build(math.max(0, w))
 end
 
@@ -289,12 +292,11 @@ local function redraw()
     -- Outer window-edge border: close every edge-facing pane into a heart
     -- rectangle. Left & right are solid heart columns (like the interior
     -- separators). The bottom row is NOT drawn here: it is the lualine status
-    -- line, whose middle is heart-filled (see heart_fill in plugins/ui.lua), so
-    -- the status line and the bottom separator are the same row. The verticals
-    -- therefore run all the way DOWN ONTO that status-line row (last = the very
-    -- bottom row, not one above it) so the frame closes onto the heart line at the
-    -- bottom corners. The TOP is intentionally left to the tab/banner row (its
-    -- heart line already caps the top panes); both verticals start at row 1 --
+    -- line (lua/plugins/ui.lua), so the status line and the bottom separator
+    -- are the same row. The verticals therefore run all the way DOWN ONTO that
+    -- status-line row (last = the very bottom row, not one above it) so the
+    -- frame's corners land on it. The TOP is intentionally left to the tab/banner
+    -- row (its heart line already caps the top panes); both verticals start at row 1 --
     -- matching the interior separators' top trim -- so they meet the tab cap at
     -- the top corners. Drawn at 36 (above pane content AND the pane-tab overlays)
     -- so the frame stays unbroken over the terminals.
@@ -309,7 +311,6 @@ local function redraw()
       -- own image edge stands in for the border there). Right & bottom never cross
       -- a portrait, so they stay whole.
       local skip = {}
-      local term_top -- top row of the bottom-left terminal pane (col 0), if any
       for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
         if api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' then
           local pos = api.nvim_win_get_position(win)
@@ -318,8 +319,6 @@ local function redraw()
             if vim.bo[buf].filetype == 'portrait' then
               local hgt = api.nvim_win_get_height(win)
               skip[#skip + 1] = { top = pos[1], bot = pos[1] + hgt - 1 }
-            elseif vim.bo[buf].buftype == 'terminal' then
-              term_top = pos[1]
             end
           end
         end
@@ -335,36 +334,33 @@ local function redraw()
         r = math.max(r, s.bot + 1)
       end
       if r <= last then
-        -- If the bottom-left pane is the terminal, start the edge on its heart
-        -- tab row (winbar + 1) rather than at the top of its 2-row tab, so the
-        -- left vertical meets the horizontal tab divider at the corner instead
-        -- of poking up past it through the ╭──╮ tab-tops row above.
-        local seg_top = r
-        if term_top and term_top + 1 > seg_top then
-          seg_top = term_top + 1
-        end
-        if seg_top <= last then
-          draw_one(seg_top, 0, last - seg_top + 1, 36) -- segment below the last portrait
-        end
+        -- Run the edge straight down through the tree (and any gap row), through
+        -- the terminal's own ╭──╮ tab-tops row, and onto its heart tab-fill row
+        -- (winbar + 1) below that -- one continuous column with no gap, so it
+        -- connects to the terminal's tab divider on that second tab line instead
+        -- of stopping short of it.
+        draw_one(r, 0, last - r + 1, 36)
       end
 
       draw_one(1, cols - 1, last, 36) -- right edge (last column), rows 1..last
       -- No bottom edge row: the heart-filled status line is the bottom separator.
 
-      -- File-tree box. The tree sits sandwiched between the two portraits in the
-      -- left column; the outer frame above already gives it a left edge (the col 0
-      -- segment drawn between the portraits) and the interior loop draws its right
-      -- edge (the tree|code separator), but its top and bottom seams are open. Add
-      -- a heart row across each so the tree closes into a rectangle while the
-      -- portraits stay open (separators only where they meet another pane).
+      -- File-tree box. The tree sits directly below the portrait in the left
+      -- column, and directly above the bottom terminal that spans the whole left
+      -- area -- the interior loop's own separator for the tree (extended down via
+      -- pane_below) already meets that terminal, so there is no bottom seam to
+      -- close here and deliberately no bottom heart row: the tree runs straight
+      -- into the terminal with no divider between them. Only the TOP seam (between
+      -- the portrait and the tree) is left open by the per-window loop -- add a
+      -- heart row there so the box closes at the top.
       --
-      -- Draw on the blank inter-window divider row just outside the tree (top-1 /
-      -- bottom+1) when one exists, so we cover the gap rather than eat a tree line.
-      -- If a portrait abuts the tree with no divider, fall back onto the tree's own
-      -- edge row -- never onto a portrait row, where a float would drop the kitty
-      -- head. Span just the tree's own columns (0..tw-1): the vertical connector
-      -- below owns the separator column (tw), so the heart row must STOP one short
-      -- of it -- the row tiles "♡ " and its blank cell would otherwise land on the
+      -- Draw on the blank inter-window divider row just above the tree (top-1)
+      -- when one exists, so we cover the gap rather than eat a tree line. If the
+      -- portrait abuts the tree with no divider, fall back onto the tree's own top
+      -- row -- never onto a portrait row, where a float would drop the kitty head.
+      -- Span just the tree's own columns (0..tw-1): the vertical connector below
+      -- owns the separator column (tw), so the heart row must STOP one short of it
+      -- -- the row tiles "♡ " and its blank cell would otherwise land on the
       -- separator column and overwrite the connector's heart at the corner.
       local function in_portrait(row)
         for _, s in ipairs(skip) do
@@ -383,29 +379,20 @@ local function redraw()
         then
           local pos = api.nvim_win_get_position(win)
           local tw = api.nvim_win_get_width(win)
-          local th = api.nvim_win_get_height(win)
           local top_row = in_portrait(pos[1] - 1) and pos[1] or pos[1] - 1
-          local bot_row = in_portrait(pos[1] + th) and (pos[1] + th - 1) or (pos[1] + th)
           if top_row >= 0 then
             draw_hrow(top_row, 0, tw, 36)
           end
-          if bot_row <= last then
-            draw_hrow(bot_row, 0, tw, 36)
-          end
-          -- Close the tree box's right side. The tree|code separator is otherwise
-          -- drawn only piecewise -- the interior loop gives each stacked tree-column
-          -- window (portrait / tree / portrait) a separator over its OWN rows only,
-          -- so the two divider rows between them (= the tree's top and bottom seam
-          -- rows) are left uncovered and the heart rows hit a void at the corner.
-          -- Draw one continuous vertical at the tree's right-edge column (tw)
-          -- spanning both seam rows. The heart rows stop at tw-1, so this column
-          -- is the connector's alone -- its solid hearts fill the corners with no
-          -- blank cell from the heart-row tiling to overwrite them.
+          -- Close the tree box's top-right corner. The tree|code separator is
+          -- otherwise drawn only from the tree's own top row down (the interior
+          -- loop gives the portrait and the tree separators over their OWN rows
+          -- only), so the divider row between them (the tree's top seam row) is
+          -- left uncovered and the heart row above would hit a void at the corner.
+          -- Draw a vertical at the tree's right-edge column (tw) spanning just that
+          -- seam gap (a no-op when the portrait abuts the tree with no gap row).
           local sep = pos[2] + tw
-          local v_top = math.max(0, top_row)
-          local v_bot = math.min(bot_row, last)
-          if v_bot >= v_top then
-            draw_one(v_top, sep, v_bot - v_top + 1, 36)
+          if top_row >= 0 then
+            draw_one(top_row, sep, pos[1] - top_row, 36)
           end
           break
         end

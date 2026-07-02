@@ -5,8 +5,8 @@
 --   |           | +portrait |           |
 --   | code view | (top)     |           |
 --   |  (top)    | file tree |  claude   |
---   |           | +portrait | (right,   |
---   |           | (bottom)  |  full     |
+--   |           |           | (right,   |
+--   |           |           |  full     |
 --   +-----------+-----------+  height)  |
 --   |   terminal (spans     |           |
 --   |   under code + tree)  |           |
@@ -30,6 +30,18 @@ M.TREE_WIDTH = 31
 -- restore the startup proportions on demand. Populated by fit_layout_to_fastfetch.
 local layout_state = nil
 
+-- Pin the tree column to the fixed default width, bounded only by the terminal's
+-- OWN total width (never by the fastfetch-measured left_w) -- that's the whole
+-- point of a fixed width: it must not shrink just because the splash logo happens
+-- to be narrow. Exposed standalone (not folded into apply_sizes) so build() can
+-- pin it immediately, synchronously, rather than waiting on the async fastfetch
+-- measurement that drives the rest of apply_sizes.
+local function apply_tree_width(treecol)
+  if treecol and vim.api.nvim_win_is_valid(treecol) then
+    pcall(vim.api.nvim_win_set_width, treecol, math.max(12, math.min(vim.o.columns - 20, M.TREE_WIDTH)))
+  end
+end
+
 -- Apply the startup pane sizes from layout_state: Claude takes everything outside
 -- the left area, the tree column is the fixed default width, and the bottom terminal
 -- is the splash height. Used both on first build and by :LayoutReset.
@@ -39,9 +51,7 @@ local function apply_sizes()
   if vim.api.nvim_win_is_valid(s.claude) then
     pcall(vim.api.nvim_win_set_width, s.claude, math.max(1, vim.o.columns - s.left_w - 1))
   end
-  if s.treecol and vim.api.nvim_win_is_valid(s.treecol) then
-    pcall(vim.api.nvim_win_set_width, s.treecol, math.max(12, math.min(s.left_w - 20, M.TREE_WIDTH)))
-  end
+  apply_tree_width(s.treecol)
   if vim.api.nvim_win_is_valid(s.bottom) then
     pcall(vim.api.nvim_win_set_height, s.bottom, s.bottom_height)
   end
@@ -190,6 +200,11 @@ local function build()
   -- tabs with the bottom terminal (every terminal pane lists all terminals).
   vim.cmd('vsplit')
   local claude = vim.api.nvim_get_current_win()
+  -- Tagged (not inferred from the buffer name): open_terminal spawns a plain
+  -- shell and TYPES the claude command into it afterwards, so the terminal
+  -- buffer's name is permanently "...:/bin/zsh" (or whatever $SHELL is), never
+  -- "claude" -- baseline.scrollguard needs a reliable way to find this window.
+  vim.api.nvim_win_set_var(claude, 'is_claude_pane', true)
   open_terminal('claude --dangerously-skip-permissions')
   splash.complete('claude')
 
@@ -230,6 +245,11 @@ local function build()
   -- it has measured the splash.
   vim.api.nvim_set_current_win(code)
   vim.cmd('wincmd =')
+  -- wincmd = just equalised the tree column away from its fixed width; pin it back
+  -- immediately rather than waiting on fit_layout_to_fastfetch's async measurement
+  -- (which can be slow, or never land if the fastfetch script fails), so the tree
+  -- is never left sitting at the equalised width.
+  apply_tree_width(treecol)
   splash.complete('layout')
 
   -- Size the left area to fit the fastfetch splash without wrapping, render it into
@@ -257,6 +277,11 @@ function M.setup()
         pcall(vim.cmd, 'NvimTreeOpen')
         return
       end
+      -- Hold the portrait heads back before the splash even goes up: kitty images
+      -- are composited by the terminal, not Neovim, so they'd otherwise bleed
+      -- through the splash's blank (transparent) cells while it's still covering
+      -- the window juggling. Reopened by portrait.lua's own 'SplashClosed' listener.
+      require('baseline.portrait').hold_reveal()
       -- Paint the splash synchronously (before the deferred build) so it covers
       -- the window juggling, and advance its bar when the portrait sheet lands.
       splash.show(SPLASH_STEPS)
