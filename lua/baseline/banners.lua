@@ -137,13 +137,6 @@ local function draw_one(row, col, height, zindex)
   if height < 1 then
     return
   end
-  -- When the 3D separators are active, a vertical run is a stretched tube image
-  -- instead of a glyph float (the kitty placement replaces the heart column here).
-  local seps = require('baseline.seps')
-  if seps.active() then
-    seps.place_vrun(row, col, height)
-    return
-  end
   local buf = api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = 'wipe'
   api.nvim_buf_set_lines(buf, 0, -1, false, vsep_lines(height))
@@ -174,13 +167,6 @@ local function draw_hrow(row, col, width, zindex)
   if width < 1 then
     return
   end
-  -- When the 3D separators are active, a horizontal run is a stretched tube image
-  -- instead of a glyph float (the kitty placement replaces the heart row here).
-  local seps = require('baseline.seps')
-  if seps.active() then
-    seps.place_hrun(row, col, width)
-    return
-  end
   local line = string.rep('♡ ', math.floor(width / 2))
   if width % 2 == 1 then
     line = line .. '♡'
@@ -208,9 +194,6 @@ end
 local function redraw()
   overlay.busy = true
   clear_overlay()
-  -- Drop last frame's tube placements before re-placing the runs that still exist
-  -- (a no-op when the 3D separators are inactive).
-  require('baseline.seps').clear('frame')
   if overlay.enabled then
     local c = M.config
 
@@ -451,13 +434,6 @@ end
 
 function M.toggle_overlay()
   M.enable_overlay(not overlay.enabled)
-end
-
--- Public: ask the overlay to repaint. Used by baseline.seps when the tube image
--- becomes resident (or when :Seps3D toggles), so the hearts<->tubes swap immediately
--- instead of waiting for the next layout event.
-function M.refresh()
-  schedule_redraw()
 end
 
 -- ---------------------------------------------------------------------------

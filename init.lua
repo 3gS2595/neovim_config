@@ -7,7 +7,6 @@ require('baseline.splash').setup()
 require('baseline.banners').setup()
 require('baseline.panetabs').setup()
 require('baseline.portrait').setup()
-require('baseline.seps').setup()
 require('baseline.layout').setup()
 require('baseline.splash_images').setup()
 

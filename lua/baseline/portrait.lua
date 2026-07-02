@@ -8,9 +8,10 @@
 --   | file tree |   <- nvim-tree (middle), grows to fill the space between
 --   |           |
 --   +-----------+
---   |  PORTRAIT |   <- square pane pinned to the BOTTOM of the column
---   |  (square) |
---   +-----------+
+--   |  PORTRAIT |   <- square pane pinned to the BOTTOM of the column. RESPONSIVE:
+--   |  (square) |      only present when the terminal WINDOW is >= config.min_bottom_height
+--   +-----------+      pixels tall (CSI 14 t); on a shorter window it is removed and the
+--                      tree reclaims its space, and it returns live if the window grows.
 --
 -- Both heads track the mouse live: 'mousemoveevent' + a <MouseMove> map feed
 -- getmousepos() into a direction PER PANE (each relative to its own centre),
@@ -73,6 +74,11 @@ M.config = {
   -- column width/2 (per square) can exceed the height available, so we cap the
   -- squares and let them be wider-than-tall rather than starve the tree between them.
   min_tree = 6,
+  -- The bottom head is RESPONSIVE: it only shows when the terminal WINDOW is at least
+  -- this tall in PIXELS (queried live via CSI 14 t). On a shorter screen the bottom
+  -- head is removed and the tree reclaims its space; growing the window back past this
+  -- adds the head again on the fly. 1080 => hide it on sub-1080p-tall windows.
+  min_bottom_height = 1080,
 }
 
 -- engine state -------------------------------------------------------------
@@ -87,9 +93,11 @@ local state = {
   active = false, -- attached and running
   ready = false, -- a kitty graphics terminal was detected
   transmitted = false, -- the sheet has been sent to the terminal
-  images = {}, -- generic transmitted image-id set (M.kitty_transmit_image), for reuse by baseline.seps
   cell = nil, -- {w, h} source pixels per pose, read from the sheet's dimensions
   idle_timer = nil, -- one-shot: fires config.idle_return ms after the last mouse move
+  win_px_h = nil, -- last terminal WINDOW height in pixels (CSI 14 t report), drives the responsive bottom head
+  px_known = false, -- whether the terminal has actually reported its pixel size yet (vs. our fallback guess)
+  bottom = nil, -- the bottom pane object while it is shown; nil when hidden on a short window
 }
 
 local uv = vim.uv or vim.loop
@@ -337,22 +345,6 @@ local function transmit_sheet()
   return true
 end
 
--- Transmit an ARBITRARY image once under `image_id` (reused by baseline.seps for the
--- 3D separators). Deduped per id, gated on a confirmed kitty terminal.
-function M.kitty_transmit_image(image_id, path)
-  if not state.ready then
-    return false
-  end
-  if state.images[image_id] then
-    return true
-  end
-  if kitty_transmit(image_id, path) then
-    state.images[image_id] = true
-    return true
-  end
-  return false
-end
-
 -- Place a crop of `image_id` into a screen-cell box, replacing any prior placement
 -- with `placement_id` in place. src = {x,y,w,h} source pixels (nil = the whole
 -- image); dst = {col,row,cols,rows} in 0-based editor cells; zindex follows kitty's
@@ -402,18 +394,13 @@ function M.kitty_place(image_id, placement_id, src, dst, zindex)
 end
 
 -- Delete a single placement (d=i keeps the image data resident; uppercase would free
--- it), so baseline.seps can drop a separator segment that no longer exists after a
--- relayout without re-transmitting the tube.
+-- it), so one head can be dropped without re-transmitting the sheet.
 function M.kitty_remove(image_id, placement_id)
   if not (kitty and kitty.ok) then
     return
   end
   local seq = '\27_Ga=d,d=i,i=' .. image_id .. ',p=' .. placement_id .. ',q=2\27\\'
   pcall(kitty.helpers.write, seq, kitty.ssh and kitty.tty or nil, true)
-end
-
-function M.kitty_is_ready()
-  return state.ready
 end
 
 -- The file-tree window sandwiched between the two portrait heads, or nil if the
@@ -748,6 +735,10 @@ end
 
 -- wiring -------------------------------------------------------------------
 
+-- Forward decls: the responsive bottom-portrait helpers are defined after add_pane
+-- (they need it), but the autocmds wired up below reference them.
+local query_win_pixels, apply_bottom_visibility
+
 local function setup_autocmds()
   local group = api.nvim_create_augroup('Portrait', { clear = true })
   -- Re-square only on events that reflow the whole layout anyway. WinResized is
@@ -757,7 +748,34 @@ local function setup_autocmds()
   api.nvim_create_autocmd({ 'VimResized', 'WinClosed', 'TabEnter' }, {
     group = group,
     callback = function()
-      vim.schedule(enforce_column)
+      vim.schedule(function()
+        enforce_column()
+        -- A terminal resize can cross the bottom-head height threshold: re-ask the
+        -- terminal for its pixel size. The reply lands on TermResponse below, which
+        -- re-applies the bottom head's visibility.
+        query_win_pixels()
+      end)
+    end,
+  })
+  -- The window's pixel size, reported by the terminal in response to query_win_pixels'
+  -- CSI 14 t (format: ESC [ 4 ; height ; width t). We cache the height and add/remove
+  -- the bottom head accordingly, so the layout responds live to a resize.
+  api.nvim_create_autocmd('TermResponse', {
+    group = group,
+    callback = function(ev)
+      local seq = (type(ev.data) == 'table' and ev.data.sequence)
+        or (type(ev.data) == 'string' and ev.data)
+        or vim.v.termresponse
+        or ''
+      if type(seq) ~= 'string' then
+        return
+      end
+      local h = seq:match('\27%[4;(%d+);%d+t')
+      if h then
+        state.win_px_h = tonumber(h)
+        state.px_known = true
+        apply_bottom_visibility()
+      end
     end,
   })
   -- A user dragging a border (WinResized) only re-crops the heads into their new boxes;
@@ -795,6 +813,87 @@ local function add_pane(square)
   return pane
 end
 
+-- responsive bottom head ----------------------------------------------------
+--
+-- The bottom head only earns its space on a tall enough window. We learn the window's
+-- PIXEL height by asking the terminal (CSI 14 t), not by guessing from cells -- rows say
+-- nothing about the physical height a head needs. When the reported height crosses
+-- config.min_bottom_height we add or remove the bottom pane in place, so growing or
+-- shrinking the window reflows the tree column live.
+
+-- Ask the terminal for its window size in pixels; the reply arrives asynchronously on
+-- TermResponse (parsed in setup_autocmds), so we never block on it. Same io.stdout path
+-- probe_kitty uses, which reaches the real terminal even over SSH.
+query_win_pixels = function()
+  pcall(function()
+    io.stdout:write('\27[14t')
+    io.stdout:flush()
+  end)
+end
+
+-- Split a fresh bottom square off the BOTTOM of the tree, wire it as a head, and let
+-- enforce_column re-square the column (the tree gives up the height). Idempotent: does
+-- nothing if the bottom head already exists or the column was never built.
+local function add_bottom_pane()
+  if state.bottom then
+    return
+  end
+  if not (state.tree and api.nvim_win_is_valid(state.tree)) then
+    return
+  end
+  local cur = api.nvim_get_current_win()
+  api.nvim_set_current_win(state.tree)
+  vim.cmd('belowright split') -- new window drops in below the tree -> the bottom square
+  local square = api.nvim_get_current_win()
+  local sbuf = scratch()
+  api.nvim_win_set_buf(square, sbuf)
+  vim.bo[sbuf].filetype = 'portrait'
+  blank_win(square)
+  state.bottom = add_pane(square)
+  if api.nvim_win_is_valid(cur) then
+    api.nvim_set_current_win(cur) -- adding the head must not steal focus
+  end
+  enforce_column() -- size the new square and hand the tree back the remainder
+end
+
+-- Tear the bottom head back out: drop its placement from the terminal, unregister the
+-- pane, close its window, and re-square the column so the tree reclaims the space.
+local function remove_bottom_pane()
+  local pane = state.bottom
+  if not pane then
+    return
+  end
+  state.bottom = nil
+  for i, p in ipairs(state.panes) do
+    if p == pane then
+      table.remove(state.panes, i)
+      break
+    end
+  end
+  stop_ease(pane)
+  M.kitty_remove(M.config.image_id, pane.placement_id) -- drop this head from the terminal
+  if pane.square and api.nvim_win_is_valid(pane.square) then
+    pcall(api.nvim_win_close, pane.square, true)
+  end
+  enforce_column()
+end
+
+-- Reconcile the bottom head with the last reported window height: show it at/above the
+-- threshold, hide it below. A no-op until we actually know the height (state.px_known),
+-- so we never flap the layout on a stale/guessed value. Idempotent, so it is safe to
+-- call from every resize and every terminal report.
+apply_bottom_visibility = function()
+  if not (state.active and state.win_px_h) then
+    return
+  end
+  local want = state.win_px_h >= M.config.min_bottom_height
+  if want and not state.bottom then
+    add_bottom_pane()
+  elseif not want and state.bottom then
+    remove_bottom_pane()
+  end
+end
+
 -- Detect kitty once, then start driving every registered pane: size the column and
 -- paint each head's first pose. Detection/transmit are shared, so this runs once for
 -- the whole column regardless of how many heads it holds.
@@ -806,6 +905,17 @@ local function attach_column()
       state.ready = ok
       state.active = true
       enforce_column() -- sizes the squares and shows the first pose on each (if ready)
+      -- Learn the window's pixel height so the bottom head can decide whether to show;
+      -- the reply lands on TermResponse and calls apply_bottom_visibility. If the
+      -- terminal never reports (no CSI 14 t support), fall back to showing the bottom
+      -- head after a short grace period so we don't strand the column headless.
+      query_win_pixels()
+      vim.defer_fn(function()
+        if state.active and not state.px_known then
+          state.win_px_h = M.config.min_bottom_height
+          apply_bottom_visibility()
+        end
+      end, 400)
       if not ok then
         vim.notify('[portrait] no kitty graphics protocol detected; panes left blank', vim.log.levels.WARN)
       end
@@ -816,33 +926,25 @@ local function attach_column()
   end)
 end
 
--- Build the three-window tree column inside `center` (assumed empty/current): a square
--- portrait pinned to the TOP, the file tree in the MIDDLE, a square portrait pinned to
--- the BOTTOM, then start the engine driving both heads. We split the bottom square off
--- `center` with belowright and the top square with aboveleft, leaving `center` as the
--- middle window for the tree.
+-- Build the tree column inside `center` (assumed empty/current): a square portrait
+-- pinned to the TOP, the file tree BELOW it, then start the engine. The BOTTOM head is
+-- NOT built here -- it is added responsively (apply_bottom_visibility) once the terminal
+-- reports a window tall enough for it, and removed again if the window shrinks. We split
+-- the top square off `center` with aboveleft, leaving `center` as the tree window.
 function M.setup_center(center)
-  -- Bottom square: split below `center`, focus moves to the new (lower) window.
-  api.nvim_set_current_win(center)
-  vim.cmd('belowright split')
-  local bottom = api.nvim_get_current_win()
-
   -- Top square: split above `center`, focus moves to the new (upper) window. `center`
-  -- stays put as the middle window, now sandwiched between the two squares.
+  -- stays put below it as the tree window.
   api.nvim_set_current_win(center)
   vim.cmd('aboveleft split')
   local top = api.nvim_get_current_win()
 
-  for _, square in ipairs({ top, bottom }) do
-    local sbuf = scratch()
-    api.nvim_win_set_buf(square, sbuf)
-    -- Tag as 'portrait' so lualine skips its winbar (disabled_filetypes in
-    -- plugins/ui.lua) -- otherwise the heart-banner winbar reads as a separator
-    -- line above the portrait.
-    vim.bo[sbuf].filetype = 'portrait'
-    blank_win(square) -- the head is drawn over this pane, so keep it visually empty
-    add_pane(square)
-  end
+  local sbuf = scratch()
+  api.nvim_win_set_buf(top, sbuf)
+  -- Tag as 'portrait' so lualine skips its winbar (disabled_filetypes in plugins/ui.lua)
+  -- -- otherwise the heart-banner winbar reads as a separator line above the portrait.
+  vim.bo[sbuf].filetype = 'portrait'
+  blank_win(top) -- the head is drawn over this pane, so keep it visually empty
+  add_pane(top)
 
   -- Middle window (`center`) gets the file tree.
   api.nvim_set_current_win(center)
@@ -858,7 +960,7 @@ function M.setup_center(center)
   pcall(api.nvim_set_option_value, 'winfixwidth', false, { win = center })
   pcall(api.nvim_set_option_value, 'winfixheight', false, { win = center })
   attach_column()
-  api.nvim_set_current_win(bottom)
+  api.nvim_set_current_win(center)
 end
 
 -- Drop the sheet from the terminal and reset every pane's geometry, so a rebuilt atlas

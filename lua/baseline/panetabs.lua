@@ -199,14 +199,7 @@ local function build(win, role, width)
     thl[#thl + 1] = { tb, tb + #fill, 'PaneTabFill' }
   end
 
-  -- When the 3D tabs are active the tops (╭──╮) are drawn as kitty tiles over this
-  -- row (see redraw -> update_header), so blank the glyph winbar so the two don't
-  -- clash. Row 2 (the title float) is untouched.
-  local top_str = table.concat(top) .. '%#WinBar#'
-  if require('baseline.seps').active() then
-    top_str = '%#WinBar#' .. string.rep(' ', math.max(0, width))
-  end
-  return top_str, table.concat(title), thl, clicks
+  return table.concat(top) .. '%#WinBar#', table.concat(title), thl, clicks
 end
 
 -- Winbar component lualine calls: top-outline row for tagged panes, else banner.
@@ -402,21 +395,6 @@ local function update_header(cwin, role)
     destroy_header(cwin)
     return
   end
-  -- 3D tab tops: a thin (cell-aspect-compensated) horizontal run over each tab's column
-  -- span on the winbar row -- the "extendable top section" of the tab. The glyph ╭──╮ row
-  -- is blanked in build() when active. Corners are pulled for now: a square corner tile
-  -- distorts ~2x in the tall cell AND its 2D rotations re-break the aspect, so they need
-  -- a dedicated aspect-aware render before they go back in. Placed in group 'tabs'.
-  local seps = require('baseline.seps')
-  if seps.active() then
-    local wb = pos[1] -- the winbar row (tab tops), one above the title float
-    for _, cl in ipairs(clicks) do
-      local w = cl.d1 - cl.d0
-      if w > 0 then
-        seps.place('tabs', 'tube_h', pos[2] + cl.d0, wb, w, 1)
-      end
-    end
-  end
   -- The float is only repainted when this signature changes. Include the pane's
   -- current buffer: switching the active tab moves the active-tab highlight even
   -- though the tab *text* (title) is unchanged, so title alone would skip the
@@ -464,9 +442,6 @@ local function update_header(cwin, role)
 end
 
 local function redraw()
-  -- Drop last cycle's tab-top tiles before update_header re-places the ones that still
-  -- exist (a no-op when the 3D tabs are inactive).
-  require('baseline.seps').clear('tabs')
   local seen = {}
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_config(win).relative == '' and role_of(win) then
@@ -502,12 +477,6 @@ local function schedule()
       ov.in_redraw = false
     end)
   )
-end
-
--- Public: repaint the tabs (used by baseline.seps when the tiles become resident or
--- :Seps3D toggles, so the glyph<->3D tab swap happens immediately).
-function M.refresh()
-  schedule()
 end
 
 -- Setup ---------------------------------------------------------------------
