@@ -251,6 +251,9 @@ local function paint_left_edge(from)
   vim.bo[buf].modifiable = true
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
+  -- Full column (no tree to stop at): the winbar row is the top corner heart,
+  -- like the right edge. Otherwise blank -- the portrait sits above the seam.
+  vim.wo[win].winbar = from <= 1 and '%#BannerVSep#♡' or ' '
   edge.left_from = from
 end
 
@@ -284,7 +287,14 @@ local function make_edge(side)
   api.nvim_win_set_var(win, 'banner_edge', true)
   local wo = vim.wo[win]
   wo.winfixwidth = true
-  wo.winbar = ''
+  -- 'winbar' is global-local: an empty LOCAL value falls back to the global
+  -- winbar expression, which reserves a blank row at the window's top and
+  -- pushes the hearts one row down. Set an explicit 1-cell value instead --
+  -- for the right edge that row IS the frame's top corner heart, aligned with
+  -- the tab rows' heart-fill line; the left edge keeps it blank so the
+  -- portrait above the tree gets no border (paint_left_edge swaps the heart
+  -- in when the column runs full height with no tree to stop at).
+  wo.winbar = side == 'right' and '%#BannerVSep#♡' or ' '
   wo.winhighlight = 'Normal:BannerVSep,NormalNC:BannerVSep'
   wo.number = false
   wo.relativenumber = false
@@ -322,7 +332,7 @@ local function ensure_edges()
   end
   if not (edge.left and api.nvim_win_is_valid(edge.left)) then
     edge.left = make_edge('left')
-    edge.left_from = edge.left and 1 or nil -- fresh window is hearts from row 1
+    edge.left_from = nil -- force the next paint_left_edge to run in full
   end
   if not (edge.right and api.nvim_win_is_valid(edge.right)) then
     edge.right = make_edge('right')

@@ -93,7 +93,16 @@ function M.render()
   local info = MODES[mode] or { mode:upper(), 'StatuslineNormal' }
   local label = ' ' .. info[1] .. ' '
   local avail = math.max(0, vim.o.columns - vim.fn.strdisplaywidth(label))
-  local hearts = string.rep('♡ ', math.floor(avail / 2))
+  -- Tile '♡ ' but ALWAYS end on a heart in the very last column: the right
+  -- edge frame column (baseline.banners) runs down to the row above this one,
+  -- and the bottom-right corner heart is what closes the frame. ('♡ ' alone
+  -- leaves the last column blank whenever avail comes out even.)
+  local hearts = ''
+  if avail > 0 then
+    local pairs_ = math.floor((avail - 1) / 2)
+    local slack = avail - 1 - pairs_ * 2 -- 0 or 1 leftover column before the corner
+    hearts = string.rep('♡ ', pairs_) .. string.rep(' ', slack) .. '♡'
+  end
   return '%#' .. info[2] .. '#' .. label .. '%#StatuslineHeart#' .. hearts
 end
 
