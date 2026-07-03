@@ -68,6 +68,10 @@ local function apply_hl()
   vim.api.nvim_set_hl(0, 'StatuslineReplace', { bg = c.yellow, fg = c.red, bold = true })
   vim.api.nvim_set_hl(0, 'StatuslineCommand', { bg = c.yellow, fg = c.red, bold = true })
   vim.api.nvim_set_hl(0, 'StatuslineHeart', { fg = c.fg, bg = 'NONE', bold = true })
+  -- "live:" indicator (Claude edit playback, baseline.follow): heart pink when
+  -- on, dimmed to the dark mode-block red when off.
+  vim.api.nvim_set_hl(0, 'StatuslineLiveOn', { fg = c.fg, bg = 'NONE', bold = true })
+  vim.api.nvim_set_hl(0, 'StatuslineLiveOff', { fg = c.red, bg = 'NONE', bold = true })
 
   -- Make the native chrome groups transparent so nothing but our own colours
   -- shows: the mode block and the heart fill paint the WHOLE row themselves
@@ -92,7 +96,13 @@ function M.render()
   local mode = vim.api.nvim_get_mode().mode
   local info = MODES[mode] or { mode:upper(), 'StatuslineNormal' }
   local label = ' ' .. info[1] .. ' '
-  local avail = math.max(0, vim.o.columns - vim.fn.strdisplaywidth(label))
+  -- Live Claude-edit playback state (baseline.follow), right of the mode block.
+  -- Toggled by clicking the portrait pane or :FollowClaude; follow.toggle()
+  -- calls redrawstatus, since nothing else repaints the statusline for it.
+  local live_on = require('baseline.follow').config.enabled
+  local live = ' live: ' .. (live_on and 'on' or 'off') .. ' '
+  local live_hl = live_on and 'StatuslineLiveOn' or 'StatuslineLiveOff'
+  local avail = math.max(0, vim.o.columns - vim.fn.strdisplaywidth(label) - vim.fn.strdisplaywidth(live))
   -- Tile '♡ ' but ALWAYS end on a heart in the very last column: the right
   -- edge frame column (baseline.banners) runs down to the row above this one,
   -- and the bottom-right corner heart is what closes the frame. ('♡ ' alone
@@ -103,7 +113,7 @@ function M.render()
     local slack = avail - 1 - pairs_ * 2 -- 0 or 1 leftover column before the corner
     hearts = string.rep('♡ ', pairs_) .. string.rep(' ', slack) .. '♡'
   end
-  return '%#' .. info[2] .. '#' .. label .. '%#StatuslineHeart#' .. hearts
+  return '%#' .. info[2] .. '#' .. label .. '%#' .. live_hl .. '#' .. live .. '%#StatuslineHeart#' .. hearts
 end
 
 function M.setup()

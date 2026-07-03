@@ -370,6 +370,25 @@ local function follow_dir()
   return state_root .. '/claude-follow/' .. vim.fn.sha256(norm_path(root))
 end
 
+-- Flip (or set) live playback. Turning it back ON fast-forwards past anything
+-- logged while it was off -- "off" means those edits weren't wanted on screen,
+-- so re-enabling must not replay the backlog. The statusline shows a
+-- "live: on/off" indicator (baseline.statusline) that only repaints on mode
+-- changes and resizes, so force a repaint here.
+function M.toggle(on)
+  if on == nil then
+    on = not M.config.enabled
+  end
+  M.config.enabled = on
+  if on and state.queue_path then
+    local ok, lines = pcall(vim.fn.readfile, state.queue_path)
+    state.queue_line = (ok and lines) and #lines or 0
+    state.queue = {}
+  end
+  vim.cmd.redrawstatus()
+  vim.notify('FollowClaude ' .. (on and 'on' or 'off'))
+end
+
 -- Begin following: `win` is the viewer window to keep in sync.
 function M.start(win)
   vim.o.autoread = true
@@ -390,13 +409,12 @@ function M.start(win)
 
   vim.api.nvim_create_user_command('FollowClaude', function(opts)
     if opts.args == 'on' then
-      M.config.enabled = true
+      M.toggle(true)
     elseif opts.args == 'off' then
-      M.config.enabled = false
+      M.toggle(false)
     else
-      M.config.enabled = not M.config.enabled
+      M.toggle()
     end
-    vim.notify('FollowClaude ' .. (M.config.enabled and 'on' or 'off'))
   end, {
     nargs = '?',
     complete = function()

@@ -545,32 +545,88 @@ function M.setup()
     'BufWritePost',
   }, { group = group, callback = schedule })
 
-  -- One global click router for the tab title rows. <expr> so we can fall
-  -- through to a normal click (return '<LeftMouse>') when the mouse isn't over
-  -- a tab row; buffer-local maps (nvim-tree etc.) still take precedence over
-  -- this. Mapped in terminal-mode too so the terminal pane's tabs are clickable
-  -- while typing (the click drops the terminal to normal mode; press i/a to
-  -- resume).
+  -- THE global left-button router. Every clickable UI region is handled here,
+  -- in one mapping: two modules each mapping <LeftMouse> globally would clobber
+  -- each other (last setup wins), which is how the portrait's map used to
+  -- silently disable tab clicks or vice versa. <expr> so we can fall through to
+  -- a normal click (return the key) when the mouse isn't over any of our UI;
+  -- buffer-local maps (nvim-tree etc.) still take precedence over this. Mapped
+  -- in terminal-mode too so the terminal pane's tabs are clickable while typing
+  -- (the click drops the terminal to normal mode; press i/a to resume).
   --
-  -- A click that falls through and lands in the Claude pane specifically (found
-  -- via scrollguard's window-tag, not just any terminal) auto-enters terminal-mode,
-  -- so clicking Claude always drops you straight into typing rather than normal
-  -- mode. Deferred via vim.schedule: the native '<LeftMouse>' return still has to
-  -- move focus/cursor there first, and textlock blocks startinsert inline anyway.
-  vim.keymap.set({ 'n', 't' }, '<LeftMouse>', function()
-    if M._click() then
+  -- Regions, in priority order:
+  --  * The portrait pane doubles as a BUTTON: left-clicking it toggles live
+  --    Claude-edit playback (baseline.follow / the statusline's "live:"
+  --    indicator) instead of focusing the pane.
+  --  * The tab title rows (M._click).
+  --  * A click that falls through and lands in ANY terminal pane (Claude, the
+  --    bottom shell, all of them) auto-enters terminal-mode, so clicking a
+  --    terminal always drops you straight into typing
+  --    rather than normal mode. Deferred via vim.schedule: the native
+  --    '<LeftMouse>' return still has to move focus/cursor there first, and
+  --    textlock blocks startinsert inline anyway. Plain single clicks only:
+  --    double-clicks must keep their default word-select behaviour there.
+  --
+  -- Multi-clicks (<2-LeftMouse>...) route through the same handler: rapid
+  -- clicking the portrait or a tab arrives as those keys, and their DEFAULT
+  -- behaviour is select-word/line -- i.e. surprise visual mode.
+  --
+  -- `swallowed` tracks a press we consumed, so the <LeftDrag>/<LeftRelease>
+  -- maps below can swallow the REST of that gesture too. The press being eaten
+  -- doesn't stop Neovim delivering the drag events, and their default would
+  -- start a visual selection from the 1-cell wiggle almost every click ships
+  -- with. A press that fell through clears the flag, so dragging in pane
+  -- content still selects text normally.
+  local swallowed = false
+  local function route(key)
+    local mp = vim.fn.getmousepos()
+    if
+      mp.winid ~= 0
+      and vim.api.nvim_win_is_valid(mp.winid)
+      and vim.bo[vim.api.nvim_win_get_buf(mp.winid)].filetype == 'portrait'
+    then
+      -- Toggle scheduled out of the expr context (expr evaluation runs under
+      -- textlock); consume the click so focus never lands on the portrait.
+      vim.schedule(function()
+        require('baseline.follow').toggle()
+      end)
+      swallowed = true
       return ''
     end
-    local mp = vim.fn.getmousepos()
-    if mp.winid == require('baseline.scrollguard').claude_win() then
+    if M._click() then
+      swallowed = true
+      return ''
+    end
+    swallowed = false
+    if
+      key == '<LeftMouse>'
+      and mp.winid ~= 0
+      and vim.api.nvim_win_is_valid(mp.winid)
+      and vim.bo[vim.api.nvim_win_get_buf(mp.winid)].buftype == 'terminal'
+    then
       vim.schedule(function()
         if vim.api.nvim_win_is_valid(mp.winid) and vim.api.nvim_get_current_win() == mp.winid then
           vim.cmd('startinsert')
         end
       end)
     end
-    return '<LeftMouse>'
-  end, { expr = true, desc = 'Pane tab click' })
+    return key
+  end
+  for _, key in ipairs({ '<LeftMouse>', '<2-LeftMouse>', '<3-LeftMouse>', '<4-LeftMouse>' }) do
+    vim.keymap.set({ 'n', 'i', 'v', 't' }, key, function()
+      return route(key)
+    end, { expr = true, desc = 'Left-click router (portrait / pane tabs / Claude)' })
+  end
+  vim.keymap.set({ 'n', 'i', 'v', 't' }, '<LeftDrag>', function()
+    return swallowed and '' or '<LeftDrag>'
+  end, { expr = true, desc = 'Swallow drags of consumed clicks' })
+  vim.keymap.set({ 'n', 'i', 'v', 't' }, '<LeftRelease>', function()
+    if swallowed then
+      swallowed = false
+      return ''
+    end
+    return '<LeftRelease>'
+  end, { expr = true, desc = 'Swallow releases of consumed clicks' })
 
   vim.keymap.set('n', '<leader>bd', function()
     local w = vim.api.nvim_get_current_win()

@@ -1,5 +1,3 @@
-
-
 - avatar 
   - dragons need assymetry, 
   - possibly not a dragon on right side

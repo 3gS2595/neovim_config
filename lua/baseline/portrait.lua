@@ -803,6 +803,11 @@ local function setup_autocmds()
   vim.keymap.set({ 'n', 'i', 'v', 't' }, '<MouseMove>', function()
     on_mouse() -- cheap: just retarget the heads; the easers bound the render rate
   end, { desc = 'Portrait: follow cursor' })
+
+  -- The portrait's click-to-toggle (live Claude-edit playback) lives in
+  -- baseline.panetabs' left-button router, NOT here: a second global
+  -- <LeftMouse> map would clobber the router (or be clobbered by it,
+  -- whichever setup ran last).
 end
 
 -- Register a square window as a head, keeping the structural pane clean. Returns the
