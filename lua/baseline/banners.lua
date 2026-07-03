@@ -194,10 +194,130 @@ local function draw_hrow(row, col, width, zindex)
   end
 end
 
+-- ---------------------------------------------------------------------------
+-- Edge windows (the outer left/right frame)
+-- ---------------------------------------------------------------------------
+--
+-- The outer frame used to be two 1-column floats at column 0 and the last
+-- column -- but the screen edges have no reserved column (unlike the interior
+-- separators, which sit on columns Neovim reserves between windows), so those
+-- floats COVERED pane content: the first column of the leftmost panes and the
+-- last column of the rightmost (Claude) pane. Same class of bug as the tab row
+-- that covered buffer line 1, and the same cure: give the frame REAL cells.
+-- Each edge is a genuine width-1 window (top-level split, winfixwidth) showing
+-- a column of hearts, so pane content truly starts inside the frame. The
+-- separator column Neovim adds between an edge window and its neighbour is
+-- left blank (fillchars vert=' ', and the vsep loop skips it) -- a deliberate
+-- 1-column breathing gap between frame and content. Bonus: a real window sits
+-- BESIDE the kitty portrait panes instead of floating OVER them, so the left
+-- frame no longer needs to skip the portrait rows and is continuous for the
+-- first time.
+local edge = { left = nil, right = nil }
+
+local function is_edge(win)
+  local ok, tag = pcall(api.nvim_win_get_var, win, 'banner_edge')
+  return ok and tag == true
+end
+
+local function destroy_edge(side)
+  local win = edge[side]
+  if win and api.nvim_win_is_valid(win) then
+    pcall(api.nvim_win_close, win, true)
+  end
+  edge[side] = nil
+end
+
+local function destroy_edges()
+  destroy_edge('left')
+  destroy_edge('right')
+end
+
+local function make_edge(side)
+  local buf = api.nvim_create_buf(false, true)
+  vim.bo[buf].buftype = 'nofile'
+  vim.bo[buf].bufhidden = 'wipe'
+  vim.bo[buf].swapfile = false
+  local hearts = {}
+  for i = 1, 500 do -- far more rows than any screen; EOB '~' never shows
+    hearts[i] = '♡'
+  end
+  api.nvim_buf_set_lines(buf, 0, -1, false, hearts)
+  vim.bo[buf].modifiable = false
+  -- Top-level split (win = -1): a full-height column at the frame's far edge.
+  -- Not noautocmd: the WinNew/WinResized this fires is what tells panetabs and
+  -- the winbar to reposition for the shifted pane columns.
+  local ok, win = pcall(api.nvim_open_win, buf, false, {
+    split = side, -- 'left' | 'right'
+    win = -1,
+    width = 1,
+  })
+  if not ok then
+    return nil
+  end
+  api.nvim_win_set_var(win, 'banner_edge', true)
+  local wo = vim.wo[win]
+  wo.winfixwidth = true
+  wo.winbar = ''
+  wo.winhighlight = 'Normal:BannerVSep,NormalNC:BannerVSep'
+  wo.number = false
+  wo.relativenumber = false
+  wo.signcolumn = 'no'
+  wo.foldcolumn = '0'
+  wo.statuscolumn = ''
+  wo.wrap = false
+  wo.scrolloff = 0
+  wo.sidescrolloff = 0
+  wo.cursorline = false
+  return win
+end
+
+-- Create/repair the edge windows. A plugin split with :topleft/:botright
+-- (nvim-tree re-opened by hand, say) can slide inside them -- if an edge is no
+-- longer at its extreme column, rebuild it. No-op while the cmdline window is
+-- open (splits are forbidden there).
+local function ensure_edges()
+  if vim.fn.getcmdwintype() ~= '' then
+    return
+  end
+  if not (overlay.enabled and M.config.border) then
+    destroy_edges()
+    return
+  end
+  if edge.left and api.nvim_win_is_valid(edge.left) and api.nvim_win_get_position(edge.left)[2] ~= 0 then
+    destroy_edge('left')
+  end
+  if
+    edge.right
+    and api.nvim_win_is_valid(edge.right)
+    and api.nvim_win_get_position(edge.right)[2] ~= vim.o.columns - 1
+  then
+    destroy_edge('right')
+  end
+  if not (edge.left and api.nvim_win_is_valid(edge.left)) then
+    edge.left = make_edge('left')
+  end
+  if not (edge.right and api.nvim_win_is_valid(edge.right)) then
+    edge.right = make_edge('right')
+  end
+end
+
+-- Columns the frame takes out of the tiling: 2 heart columns + the 2 blank
+-- separator columns beside them. baseline.layout subtracts this when sizing
+-- the Claude pane so the left area keeps its fastfetch-fitted width.
+function M.edge_overhead()
+  if overlay.enabled and M.config.border then
+    return 4
+  end
+  return 0
+end
+
 local function redraw()
   overlay.busy = true
   clear_overlay()
   if overlay.enabled then
+    -- pcall: creating a split fires WinNew synchronously, and a third-party
+    -- handler that errors must not leave overlay.busy stuck.
+    pcall(ensure_edges)
     local c = M.config
 
     -- Snapshot every non-floating window's rectangle up front, so a separator can
@@ -206,7 +326,7 @@ local function redraw()
     -- stacked in the same column (whose own separator already continues the line).
     local rects = {}
     for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
-      if api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' then
+      if api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' and not is_edge(win) then
         local pos = api.nvim_win_get_position(win)
         rects[#rects + 1] = {
           top = pos[1],
@@ -237,12 +357,19 @@ local function redraw()
       return nil
     end
 
+    -- The separator columns beside the edge windows stay BLANK (the breathing
+    -- gap between frame and content): skip the edge windows themselves (left
+    -- gap) and any separator whose right-hand neighbour is the right edge
+    -- window (right gap).
+    local rgap = edge.right
+      and api.nvim_win_is_valid(edge.right)
+      and api.nvim_win_get_position(edge.right)[2] - 1
     for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
-      if api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' then
+      if api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' and not is_edge(win) then
         local pos = api.nvim_win_get_position(win)
         local col = pos[2] + api.nvim_win_get_width(win)
         -- Only windows with a neighbour to the right have a separator.
-        if col < vim.o.columns then
+        if col < vim.o.columns and col ~= rgap then
           -- pos[1] is the window's TOP row -- already the winbar row when the
           -- window has a winbar (text sits one below), so the separator starts
           -- right there. The old code subtracted a row here on the assumption
@@ -283,33 +410,24 @@ local function redraw()
       end
     end
 
-    -- Outer window-edge border: close every edge-facing pane into a heart
-    -- rectangle. Left & right are solid heart columns (like the interior
-    -- separators). The bottom row is NOT drawn here: it is the lualine status
-    -- line (lua/plugins/ui.lua), so the status line and the bottom separator
-    -- are the same row. The verticals therefore run all the way DOWN ONTO that
-    -- status-line row (last = the very bottom row, not one above it) so the
-    -- frame's corners land on it. The TOP is intentionally left to the tab/banner
-    -- row: both verticals start at row 1 -- the top panes' winbar row, where the
-    -- 2-row tab puts its heart fill (row 0 is the tabline carrying the ╭──╮ tab
-    -- tops) -- so they meet the tab cap at the top corners. Drawn at 36 (above
-    -- pane content AND the pane-tab overlays) so the frame stays unbroken over
-    -- the terminals.
+    -- Outer window-edge frame: the left/right heart columns are the REAL edge
+    -- windows (see ensure_edges above), so they never cover pane content the
+    -- way the old col-0 / last-col floats did. The bottom row is the
+    -- heart-filled status line; the top is the tab rows. Only the file-tree
+    -- box seams still need floats here.
     if c.border then
-      local cols = vim.o.columns
-      local last = vim.o.lines - 1
+      -- The leftmost CONTENT column (the tree/portrait column): just inside
+      -- the left edge window and its blank gap column.
+      local content_left = (edge.left and api.nvim_win_is_valid(edge.left)) and 2 or 0
 
-      -- The left edge (col 0) runs over the kitty PORTRAIT panes. A float on top
-      -- of a kitty graphics placement makes some terminals (notably WezTerm over
-      -- SSH) drop the image entirely, blanking the head -- so split the left border
-      -- to SKIP those panes' rows, leaving the portrait squares untouched (their
-      -- own image edge stands in for the border there). Right & bottom never cross
-      -- a portrait, so they stay whole.
+      -- Portrait rows in the left column: a float on top of a kitty graphics
+      -- placement makes some terminals (notably WezTerm over SSH) drop the
+      -- image entirely -- the tree-box seam row below must never land on one.
       local skip = {}
       for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
         if api.nvim_win_is_valid(win) and api.nvim_win_get_config(win).relative == '' then
           local pos = api.nvim_win_get_position(win)
-          if pos[2] == 0 then
+          if pos[2] == content_left then
             local buf = api.nvim_win_get_buf(win)
             if vim.bo[buf].filetype == 'portrait' then
               local hgt = api.nvim_win_get_height(win)
@@ -318,27 +436,6 @@ local function redraw()
           end
         end
       end
-      table.sort(skip, function(a, b)
-        return a.top < b.top
-      end)
-      local r = 1 -- next un-drawn row of the left edge
-      for _, s in ipairs(skip) do
-        if s.top > r then
-          draw_one(r, 0, s.top - r, 36) -- segment above this portrait
-        end
-        r = math.max(r, s.bot + 1)
-      end
-      if r <= last then
-        -- Run the edge straight down through the tree (and any gap row), through
-        -- the terminal's ╭──╮ tab-tops overlay on the divider row, and onto its
-        -- heart tab-fill row (the winbar) below that -- one continuous column
-        -- with no gap, so it connects to the terminal's tab divider on that
-        -- second tab line instead of stopping short of it.
-        draw_one(r, 0, last - r + 1, 36)
-      end
-
-      draw_one(1, cols - 1, last, 36) -- right edge (last column), rows 1..last
-      -- No bottom edge row: the heart-filled status line is the bottom separator.
 
       -- File-tree box. The tree sits directly below the portrait in the left
       -- column, and directly above the bottom terminal that spans the whole left
@@ -353,9 +450,9 @@ local function redraw()
       -- when one exists, so we cover the gap rather than eat a tree line. If the
       -- portrait abuts the tree with no divider, fall back onto the tree's own top
       -- row -- never onto a portrait row, where a float would drop the kitty head.
-      -- Span just the tree's own columns (0..tw-1): the vertical connector below
-      -- owns the separator column (tw), so the heart row must STOP one short of it
-      -- -- the row tiles "♡ " and its blank cell would otherwise land on the
+      -- Span just the tree's own columns: the vertical connector below owns the
+      -- separator column at its right edge, so the heart row must STOP one short
+      -- of it -- the row tiles "♡ " and its blank cell would otherwise land on the
       -- separator column and overwrite the connector's heart at the corner.
       local function in_portrait(row)
         for _, s in ipairs(skip) do
@@ -369,21 +466,21 @@ local function redraw()
         if
           api.nvim_win_is_valid(win)
           and api.nvim_win_get_config(win).relative == ''
-          and api.nvim_win_get_position(win)[2] == 0
+          and api.nvim_win_get_position(win)[2] == content_left
           and vim.bo[api.nvim_win_get_buf(win)].filetype == 'NvimTree'
         then
           local pos = api.nvim_win_get_position(win)
           local tw = api.nvim_win_get_width(win)
           local top_row = in_portrait(pos[1] - 1) and pos[1] or pos[1] - 1
           if top_row >= 0 then
-            draw_hrow(top_row, 0, tw, 36)
+            draw_hrow(top_row, pos[2], tw, 36)
           end
           -- Close the tree box's top-right corner. The tree|code separator is
           -- otherwise drawn only from the tree's own top row down (the interior
           -- loop gives the portrait and the tree separators over their OWN rows
           -- only), so the divider row between them (the tree's top seam row) is
           -- left uncovered and the heart row above would hit a void at the corner.
-          -- Draw a vertical at the tree's right-edge column (tw) spanning just that
+          -- Draw a vertical at the tree's right-edge column spanning just that
           -- seam gap (a no-op when the portrait abuts the tree with no gap row).
           local sep = pos[2] + tw
           if top_row >= 0 then
@@ -393,6 +490,8 @@ local function redraw()
         end
       end
     end
+  else
+    destroy_edges()
   end
   overlay.busy = false
   overlay.pending = false
@@ -444,6 +543,33 @@ function M.setup()
     { 'WinNew', 'WinClosed', 'WinResized', 'VimResized', 'TabEnter', 'BufWinEnter' },
     { group = group, callback = schedule_redraw }
   )
+
+  -- The edge windows are chrome, not places to land: bounce focus off them
+  -- (wincmd hjkl, mouse clicks, wincmd w cycling) back to the last real window,
+  -- falling back to any non-edge split if 'previous' is an edge too.
+  vim.api.nvim_create_autocmd('WinEnter', {
+    group = group,
+    callback = function()
+      local win = vim.api.nvim_get_current_win()
+      if not is_edge(win) then
+        return
+      end
+      vim.schedule(function()
+        if vim.api.nvim_get_current_win() ~= win then
+          return -- something else already moved focus
+        end
+        vim.cmd('wincmd p')
+        if is_edge(vim.api.nvim_get_current_win()) then
+          for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+            if vim.api.nvim_win_get_config(w).relative == '' and not is_edge(w) then
+              vim.api.nvim_set_current_win(w)
+              break
+            end
+          end
+        end
+      end)
+    end,
+  })
 
   vim.api.nvim_create_user_command('BannerVSep', function(opts)
     local arg = opts.args
