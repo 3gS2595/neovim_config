@@ -172,8 +172,8 @@ local function cursor_offset(pane)
   local g = pane.sgeo or square_geometry(pane)
   local cx = g.col + g.width / 2
   local cy = g.row + g.height / 2
-  -- getmousepos is 1-based and screen-relative; with showtabline=0 the editor
-  -- grid starts at screen row/col 1, so subtract 1 to match win position.
+  -- getmousepos is 1-based and screen-relative; window positions are 0-based
+  -- screen cells (they include the tabline row), so subtract 1 to match.
   local dx = (mp.screencol - 1) - cx
   local dy = (mp.screenrow - 1) - cy
   -- Distance from the centre to each window edge (vim.o.columns/lines = full editor
@@ -358,7 +358,8 @@ function M.kitty_place(image_id, placement_id, src, dst, zindex)
     return
   end
   local c = kitty.codes.control
-  -- screen cursor is 1-based; with showtabline=0 the editor grid starts at 1,1.
+  -- screen cursor is 1-based; dst rows come from window positions, which are
+  -- 0-based screen cells (tabline row included), so +1 converts to screen cells.
   local x, y = dst.col + 1, dst.row + 1
   -- Inside tmux the graphics cursor is pane-relative; shift to absolute screen cells.
   if kitty.utils and kitty.utils.tmux and kitty.utils.tmux.is_tmux then
@@ -802,6 +803,11 @@ local function setup_autocmds()
   vim.keymap.set({ 'n', 'i', 'v', 't' }, '<MouseMove>', function()
     on_mouse() -- cheap: just retarget the heads; the easers bound the render rate
   end, { desc = 'Portrait: follow cursor' })
+
+  -- The portrait's click-to-toggle (live Claude-edit playback) lives in
+  -- baseline.panetabs' left-button router, NOT here: a second global
+  -- <LeftMouse> map would clobber the router (or be clobbered by it,
+  -- whichever setup ran last).
 end
 
 -- Register a square window as a head, keeping the structural pane clean. Returns the

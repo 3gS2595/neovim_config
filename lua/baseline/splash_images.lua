@@ -207,7 +207,7 @@ function M.render(opts)
     if file and not file:match('^/') then file = path(file) end
     local image_id = M.config.base_image_id + idx
     if transmit(file, image_id) then
-      -- window top-left is (pos+1) in 1-based screen cells (showtabline=0), like portrait
+      -- window top-left is (pos+1) in 1-based screen cells (positions include the tabline row), like portrait
       local sy = pos[1] + 1 + brow + (im.row or 0)
       local sx = pos[2] + 1 + bcol + (im.col or 0)
       display(image_id, sx, sy, im.cols or 10, im.rows or 6, im.z or 1)

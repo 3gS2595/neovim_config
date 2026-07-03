@@ -45,11 +45,15 @@ end
 -- Apply the startup pane sizes from layout_state: Claude takes everything outside
 -- the left area, the tree column is the fixed default width, and the bottom terminal
 -- is the splash height. Used both on first build and by :LayoutReset.
+-- baseline.banners' edge frame consumes columns of its own (the heart columns +
+-- their blank gap columns), so subtract its overhead too -- otherwise the left
+-- area comes out narrower than the fastfetch-fitted left_w and the splash wraps.
 local function apply_sizes()
   local s = layout_state
   if not s then return end
   if vim.api.nvim_win_is_valid(s.claude) then
-    pcall(vim.api.nvim_win_set_width, s.claude, math.max(1, vim.o.columns - s.left_w - 1))
+    local edge = require('baseline.banners').edge_overhead()
+    pcall(vim.api.nvim_win_set_width, s.claude, math.max(1, vim.o.columns - s.left_w - 1 - edge))
   end
   apply_tree_width(s.treecol)
   if vim.api.nvim_win_is_valid(s.bottom) then
@@ -260,6 +264,10 @@ local function build()
   -- Keep the code view following whatever file gets edited (e.g. by Claude in
   -- the right terminal) without stealing focus from the terminal.
   require('baseline.follow').start(code)
+
+  -- Land in the Claude pane in terminal mode, ready to type at Claude.
+  vim.api.nvim_set_current_win(claude)
+  vim.cmd('startinsert')
 end
 
 function M.setup()
