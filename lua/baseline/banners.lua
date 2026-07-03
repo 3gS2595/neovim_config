@@ -212,7 +212,6 @@ local function redraw()
           top = pos[1],
           left = pos[2],
           width = api.nvim_win_get_width(win),
-          winbar = api.nvim_get_option_value('winbar', { win = win }) ~= '',
         }
       end
     end
@@ -260,28 +259,23 @@ local function redraw()
           -- glyph onto the statusline row.
           local last = vim.o.lines - 1 - (vim.o.laststatus == 3 and 1 or 0)
           local bottom = math.min(top + height - 1, last)
-          -- At the editor's top edge the neighbouring panes open with a 2-row tab
-          -- whose heart-fill divider is the SECOND row (the first is just the tab
-          -- tops, ╭──╮). Drop this separator's first row so it begins on that heart
-          -- line and meets the horizontal tab there, rather than poking a lone glyph
-          -- up beside the tab tops. (Only separators touching row 0 -- the ones
-          -- bordering the top tabs -- not the stacked tree-column ones.)
-          if pos[1] == 0 then
-            top = top + 1
-          end
+          -- (Top-edge panes sit at row 1, below the always-on tabline. Their
+          -- winbar is the heart tab-fill row -- baseline.panetabs draws the tab
+          -- TITLE row there -- so the separator already begins on the heart line;
+          -- the ╭──╮ tab-tops overlay lives above it on the tabline row, which
+          -- stays clear of separator glyphs.)
           -- If a wider pane sits below this separator spanning across its column
           -- (e.g. the full-width bottom terminal under the tree|code split), the
-          -- vertical line otherwise dies a few rows short of that pane's
-          -- horizontal heart divider -- across the blank inter-window divider row
-          -- and the pane's own winbar (a 2-row tab puts the heart FILL on its
-          -- overlay row, = winbar + 1). Extend the separator down onto that heart
-          -- row so the two meet on the same line, and lift it above the pane-tab
-          -- overlay so the heart shows at the crossing.
+          -- vertical line otherwise dies a row short of that pane's horizontal
+          -- heart divider -- across the inter-window divider row (which carries
+          -- that pane's ╭──╮ tab-tops overlay) and onto its winbar, where a
+          -- 2-row tab puts the heart FILL. Extend the separator down onto that
+          -- heart row so the two meet on the same line, and lift it above the
+          -- pane-tab overlay so the heart shows at the crossing.
           local zindex
           local w = pane_below(bottom, col)
           if w then
-            local heart = w.winbar and (w.top + 1) or w.top
-            bottom = math.min(heart, last)
+            bottom = math.min(w.top, last)
             zindex = 36
           end
           draw_one(top + c.v_row_offset, col, bottom - top + 1 + c.v_height_offset, zindex)
@@ -296,10 +290,11 @@ local function redraw()
     -- are the same row. The verticals therefore run all the way DOWN ONTO that
     -- status-line row (last = the very bottom row, not one above it) so the
     -- frame's corners land on it. The TOP is intentionally left to the tab/banner
-    -- row (its heart line already caps the top panes); both verticals start at row 1 --
-    -- matching the interior separators' top trim -- so they meet the tab cap at
-    -- the top corners. Drawn at 36 (above pane content AND the pane-tab overlays)
-    -- so the frame stays unbroken over the terminals.
+    -- row: both verticals start at row 1 -- the top panes' winbar row, where the
+    -- 2-row tab puts its heart fill (row 0 is the tabline carrying the ╭──╮ tab
+    -- tops) -- so they meet the tab cap at the top corners. Drawn at 36 (above
+    -- pane content AND the pane-tab overlays) so the frame stays unbroken over
+    -- the terminals.
     if c.border then
       local cols = vim.o.columns
       local last = vim.o.lines - 1
@@ -335,10 +330,10 @@ local function redraw()
       end
       if r <= last then
         -- Run the edge straight down through the tree (and any gap row), through
-        -- the terminal's own ╭──╮ tab-tops row, and onto its heart tab-fill row
-        -- (winbar + 1) below that -- one continuous column with no gap, so it
-        -- connects to the terminal's tab divider on that second tab line instead
-        -- of stopping short of it.
+        -- the terminal's ╭──╮ tab-tops overlay on the divider row, and onto its
+        -- heart tab-fill row (the winbar) below that -- one continuous column
+        -- with no gap, so it connects to the terminal's tab divider on that
+        -- second tab line instead of stopping short of it.
         draw_one(r, 0, last - r + 1, 36)
       end
 

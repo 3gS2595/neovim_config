@@ -14,7 +14,8 @@ vim.opt.ignorecase = true -- Case insensitive searching UNLESS /C or capital in 
 vim.opt.smarttab = true
 vim.opt.breakindent = true
 vim.opt.shiftwidth = 2
-vim.opt.showtabline = 0
+-- 'showtabline' is owned by baseline.panetabs (always-on blank tabline: the
+-- free row its top-edge tab-tops overlays are drawn on).
 vim.opt.tabstop = 2
 vim.opt.wrap = false         -- No Wrap lines
 vim.opt.backspace = { 'start', 'eol', 'indent' }
