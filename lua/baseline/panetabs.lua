@@ -321,8 +321,9 @@ function M.close_current()
   M.close_buf(win, vim.api.nvim_get_current_buf(), role_of(win))
 end
 
--- Open a new tab in the focused pane: a fresh interactive terminal in a terminal
--- pane, otherwise a blank [No Name] file buffer (Chrome's Ctrl-T).
+-- Open a new tab in the focused pane: a fresh interactive terminal (which
+-- auto-runs `f`) in a terminal pane, otherwise a blank [No Name] file buffer
+-- (Chrome's Ctrl-T).
 function M.new_tab()
   local win = vim.api.nvim_get_current_win()
   local role = role_of(win)
@@ -331,6 +332,13 @@ function M.new_tab()
   end
   if role == 'terms' then
     vim.cmd('terminal')
+    -- "Type" `f` into the new shell (send to the channel rather than
+    -- `:terminal f`: that would run a non-interactive `shell -c` that skips
+    -- the rc, so the alias wouldn't resolve and the shell wouldn't stay alive).
+    local job = vim.b.terminal_job_id
+    vim.defer_fn(function()
+      pcall(vim.api.nvim_chan_send, job, 'f\n')
+    end, 200)
     vim.cmd('startinsert')
   else
     vim.cmd('enew')

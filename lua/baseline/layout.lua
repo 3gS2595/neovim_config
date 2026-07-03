@@ -264,6 +264,10 @@ local function build()
   -- Keep the code view following whatever file gets edited (e.g. by Claude in
   -- the right terminal) without stealing focus from the terminal.
   require('baseline.follow').start(code)
+
+  -- Land in the Claude pane in terminal mode, ready to type at Claude.
+  vim.api.nvim_set_current_win(claude)
+  vim.cmd('startinsert')
 end
 
 function M.setup()

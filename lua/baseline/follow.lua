@@ -22,7 +22,7 @@ local uv = vim.uv
 local M = {}
 
 M.config = {
-  enabled = true,
+  enabled = false,
   interval = 500, -- queue poll period in ms
   animate = true, -- replay edits as a typing animation
   char_interval = 18, -- typing tick period in ms

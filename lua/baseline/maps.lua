@@ -69,6 +69,10 @@ end
 -- inside terminal buffers (including the Claude pane and shells), so Esc no longer
 -- reaches the program running there (e.g. Claude's Esc-to-interrupt).
 keymap.set('t', '<Esc>', [[<C-\><C-n>]])
+-- Shift+Esc feeds a real Esc to the terminal program instead (Claude's
+-- Esc-to-interrupt/back). Needs the kitty keyboard protocol to be distinct
+-- from plain Esc -- kitty and Neovim >=0.10 both speak it.
+keymap.set('t', '<S-Esc>', '<Esc>')
 
 -- Resize window. On Alt+arrows, not <C-w>+arrows: <C-w> alone is the Chrome
 -- "close tab" shortcut (baseline.panetabs), and a <C-w><arrow> mapping would make
