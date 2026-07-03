@@ -225,6 +225,33 @@ local function destroy_edge(side)
     pcall(api.nvim_win_close, win, true)
   end
   edge[side] = nil
+  if side == 'left' then
+    edge.left_from = nil
+  end
+end
+
+-- Blank the left edge's hearts ABOVE editor row `from` (0-based). The portrait
+-- squares at the top of the tree column keep a clean top and left edge -- the
+-- frame "begins" at the tree box's top corner (the seam row, where the tree's
+-- heart cap meets it) and runs down from there. Buffer line i renders at
+-- editor row i: the edge window sits at row 1, just below the tabline.
+local function paint_left_edge(from)
+  local win = edge.left
+  if not (win and api.nvim_win_is_valid(win)) then
+    return
+  end
+  if edge.left_from == from then
+    return
+  end
+  local buf = api.nvim_win_get_buf(win)
+  local lines = {}
+  for i = 1, 500 do
+    lines[i] = i < from and '' or '♡'
+  end
+  vim.bo[buf].modifiable = true
+  api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  edge.left_from = from
 end
 
 local function destroy_edges()
@@ -295,6 +322,7 @@ local function ensure_edges()
   end
   if not (edge.left and api.nvim_win_is_valid(edge.left)) then
     edge.left = make_edge('left')
+    edge.left_from = edge.left and 1 or nil -- fresh window is hearts from row 1
   end
   if not (edge.right and api.nvim_win_is_valid(edge.right)) then
     edge.right = make_edge('right')
@@ -462,6 +490,10 @@ local function redraw()
         end
         return false
       end
+      -- The left edge's hearts start at the tree box's top corner (seam row),
+      -- so the portrait squares above it get no left border. Falls back to the
+      -- full column (row 1) when there is no tree to anchor to.
+      local ledge_from = 1
       for _, win in ipairs(api.nvim_tabpage_list_wins(0)) do
         if
           api.nvim_win_is_valid(win)
@@ -473,7 +505,11 @@ local function redraw()
           local tw = api.nvim_win_get_width(win)
           local top_row = in_portrait(pos[1] - 1) and pos[1] or pos[1] - 1
           if top_row >= 0 then
-            draw_hrow(top_row, pos[2], tw, 36)
+            -- Start at column 0 so the row runs from the edge window's own
+            -- heart, across the blank gap column, along the tree's top -- one
+            -- unbroken cap whose left end IS the frame corner.
+            draw_hrow(top_row, 0, content_left + tw, 36)
+            ledge_from = math.max(1, top_row)
           end
           -- Close the tree box's top-right corner. The tree|code separator is
           -- otherwise drawn only from the tree's own top row down (the interior
@@ -489,6 +525,7 @@ local function redraw()
           break
         end
       end
+      paint_left_edge(ledge_from)
     end
   else
     destroy_edges()
